@@ -1,6 +1,6 @@
 # streamlit_app.py
 # UAE Men Shoes — Global Lows (Supabase REST API + Streamlit)
-# Plotly charts + per-card charts (no lazy load) + diagnostics logs
+# Plotly charts + per-card charts (last 200 points per URL) + diagnostics logs
 
 import math
 import os
@@ -240,35 +240,40 @@ def fetch_items(flt: dict, page: int, page_size: int) -> tuple[pd.DataFrame, int
     return df, total
 
 
+# ============================ Series loader: latest N points per URL ============================
+
+MAX_POINTS = 200  # last N timestamps per product URL
+
 @st.cache_data(ttl=300)
-def fetch_series_from(table_name: str, item_url: str, limit: int = 5000) -> pd.DataFrame:
+def fetch_series(item_url: str, n: int = MAX_POINTS) -> pd.DataFrame:
+    """
+    Fetch the most recent N points for a product URL (primary table first, then fallback),
+    then sort ascending for plotting. De-duplicates exact same timestamp rows.
+    """
     params = {
         "select": "timestamp,price",
         "url": f"eq.{item_url}",   # let requests encode
-        "order": "timestamp.asc",
-        "limit": str(limit),
+        "order": "timestamp.desc", # newest first
+        "limit": str(n),
     }
-    t0 = time.perf_counter()
-    data, _ = http_get(f"{REST}/{table_name}", params, label=f"fetch_series:{table_name}")
+
+    # Try primary table
+    data, _ = http_get(f"{REST}/{PRICES_PRIMARY}", params, label="fetch_series:lastN:primary")
     df = pd.DataFrame(data)
-    if not df.empty:
-        ts = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
-        df["timestamp"] = ts.dt.tz_convert("Asia/Beirut")
-    LOG.log("fetch_series result", {
-        "table": table_name,
-        "url_preview": item_url[:60] + "…",
-        "rows": len(df),
-        "elapsed_s": round(time.perf_counter() - t0, 3)
-    })
-    return df
 
-
-@st.cache_data(ttl=300)
-def fetch_series(item_url: str, limit: int = 5000) -> pd.DataFrame:
-    df = fetch_series_from(PRICES_PRIMARY, item_url, limit)
+    # Fallback if needed
     if df.empty:
-        LOG.log("Primary prices table returned 0 rows; trying fallback", {"primary": PRICES_PRIMARY, "fallback": PRICES_FALLBACK})
-        df = fetch_series_from(PRICES_FALLBACK, item_url, limit)
+        data, _ = http_get(f"{REST}/{PRICES_FALLBACK}", params, label="fetch_series:lastN:fallback")
+        df = pd.DataFrame(data)
+
+    if df.empty:
+        return df
+
+    # Make tz-aware and sort ASC for the chart
+    ts = pd.to_datetime(df["timestamp"], utc=True, errors="coerce").dt.tz_convert("Asia/Beirut")
+    df = df.assign(timestamp=ts).dropna(subset=["timestamp"])
+    df = df.drop_duplicates(subset=["timestamp"], keep="last").sort_values("timestamp").reset_index(drop=True)
+    LOG.log("fetch_series result (lastN)", {"rows": len(df), "limit": n})
     return df
 
 
@@ -309,8 +314,8 @@ with st.form("filters_form"):
         )
     with c3:
         drop_prev = st.slider("Drop vs previous (%)", -100, 100, (-100, 100))
-        drop_30 = st.slider("Drop vs 30‑day avg (%)", -100, 100, (-100, 100))
-        drop_90 = st.slider("Drop vs 90‑day avg (%)", -100, 100, (-100, 100))
+        drop_30 = st.slider("Drop vs 30-day avg (%)", -100, 100, (-100, 100))
+        drop_90 = st.slider("Drop vs 90-day avg (%)", -100, 100, (-100, 100))
 
     st.markdown("---")
     cA, cB, cC = st.columns(3)
@@ -410,9 +415,9 @@ for r in range(rows):
                     st.metric("90d Δ", pct_fmt(row.get("delta_vs_90d_pct")))
                     st.caption(f"2nd-lowest gap: {pct_fmt(row.get('gap_to_second_lowest_pct'))}")
 
-                # ---- Price history: load for every card (cached) ----
+                # ---- Price history: last 200 timestamps per URL (cached) ----
                 with st.expander("📈 Price History (AED)", expanded=False):
-                    ts = fetch_series(row["url"])
+                    ts = fetch_series(row["url"], n=MAX_POINTS)
                     if ts.empty:
                         st.info("No time-series data.")
                     else:
@@ -430,7 +435,7 @@ for r in range(rows):
                             height=300,
                         )
                         st.plotly_chart(fig, use_container_width=True)
-                    LOG.log("Rendered series chart", {"url_preview": row["url"][:60] + "…"})
+                    LOG.log("Rendered series chart (lastN)", {"url_preview": row["url"][:60] + "…", "points": len(ts)})
 
 # Final: render logs
 LOG.render()
