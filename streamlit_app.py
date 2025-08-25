@@ -329,16 +329,16 @@ def load_options():
     # Pull MANY rows but only the needed columns, ordered, to collect uniques reliably
     brands_raw, _ = http_get(
         f"{REST}/{MV}",
-        {"select": "brand", "brand": "is.not.null", "order": "brand.asc", "limit": "10000"},
+        {"select": "brand", "brand": "not.is.null", "order": "brand.asc", "limit": "10000"},
         label="load_brands",
     )
     cats_raw, _ = http_get(
         f"{REST}/{MV}",
-        {"select": "category", "category": "is.not.null", "order": "category.asc", "limit": "10000"},
+        {"select": "category", "category": "not.is.null", "order": "category.asc", "limit": "10000"},
         label="load_categories",
     )
-    # Get ranges for sliders (min/max) without scanning everything:
-    # ask for the single min & max rows of each column
+
+    # Get ranges for sliders (single-row min/max fetches)
     def minmax(col, cast=float):
         lo_rows, _ = http_get(f"{REST}/{MV}", {"select": col, "order": f"{col}.asc", "limit": "1"}, label=f"min_{col}")
         hi_rows, _ = http_get(f"{REST}/{MV}", {"select": col, "order": f"{col}.desc", "limit": "1"}, label=f"max_{col}")
@@ -349,7 +349,7 @@ def load_options():
     pmin, pmax = minmax("latest_price", float)
     hmin, hmax = minmax("min_hits", int)
 
-    # Build unique lists (keep raw values), but we’ll *display* trimmed text
+    # Build unique lists
     bdf = pd.DataFrame(brands_raw)
     cdf = pd.DataFrame(cats_raw)
     brands = (
@@ -367,7 +367,6 @@ def load_options():
            .tolist()
     )
 
-    # Log for debugging
     LOG.log("load_options (full-scan lists)", {
         "brands_count": len(brands),
         "categories_count": len(categories),
@@ -375,6 +374,7 @@ def load_options():
         "hits_range": [hmin, hmax],
     })
     return sorted(brands), sorted(categories), float(pmin), float(pmax), int(hmin), int(hmax)
+
 
 
 
@@ -705,5 +705,6 @@ for r in range(rows):
 
 # Final: logs
 LOG.render()
+
 
 
