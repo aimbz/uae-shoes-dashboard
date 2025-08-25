@@ -1,6 +1,7 @@
 # streamlit_app.py
 # UAE Men Shoes — Global Lows (Supabase REST API + Streamlit)
-# Plotly charts + per-card charts (last 200 points per URL) + diagnostics logs
+# Plotly charts + last 200 points per URL + diagnostics
+# Robust to reruns/reconnects: filters & page persist via st.query_params
 
 import math
 import os
@@ -9,6 +10,7 @@ import time
 import json
 import platform
 from datetime import datetime, timezone
+from urllib.parse import quote_plus, unquote_plus
 
 import pandas as pd
 import requests
@@ -117,10 +119,131 @@ HDR = {
     "Prefer": "count=exact",
 }
 
+# ============================ Persistent state & helpers ============================
+
+if "filters_applied" not in st.session_state:
+    st.session_state["filters_applied"] = False
+if "page" not in st.session_state:
+    st.session_state["page"] = 0
+
+def qp_get():
+    try:
+        return dict(st.query_params)
+    except Exception:
+        # Fallback for older builds
+        return st.experimental_get_query_params()
+
+def qp_set(new_params: dict):
+    # Convert lists to scalars
+    qp = {k: (",".join(v) if isinstance(v, list) else str(v)) for k, v in new_params.items() if v is not None}
+    try:
+        st.query_params.update(qp)
+    except Exception:
+        st.experimental_set_query_params(**qp)
+
+def qp_clear():
+    try:
+        st.query_params.clear()
+    except Exception:
+        st.experimental_set_query_params()
+
+def encode_filters_to_qp():
+    # Build query params from current widget state
+    brands = st.session_state.get("w_brands", [])
+    category = st.session_state.get("w_category") or ""
+    hits = st.session_state.get("w_hits")
+    price = st.session_state.get("w_price")
+    order = st.session_state.get("w_order_by")
+    desc = 1 if st.session_state.get("w_order_desc", True) else 0
+    page = st.session_state.get("page", 0)
+    ps = st.session_state.get("w_page_size", 24)
+
+    qp = {
+        "applied": "1",
+        "brands": ",".join([quote_plus(b) for b in brands]) if brands else "",
+        "category": quote_plus(category) if category else "",
+        "hits": f"{hits[0]}-{hits[1]}" if hits else "",
+        "price": f"{price[0]}-{price[1]}" if price else "",
+        "order": order or "",
+        "desc": str(desc),
+        "page": str(page),
+        "ps": str(ps),
+    }
+    qp_set(qp)
+
+def parse_range(s: str, cast=float):
+    try:
+        lo, hi = s.split("-", 1)
+        return (cast(lo), cast(hi))
+    except Exception:
+        return None
+
+def hydrate_from_qp(brands_opts, categories_opts, pmin, pmax, hmin, hmax):
+    qp = qp_get()
+    if not qp or (qp.get("applied") != "1" and not any(k in qp for k in ("brands", "category", "order"))):
+        return  # nothing to hydrate
+
+    # brands
+    if "brands" in qp and qp["brands"]:
+        decoded = [unquote_plus(b) for b in qp["brands"].split(",") if b]
+        st.session_state["w_brands"] = [b for b in decoded if b in brands_opts]
+
+    # category
+    if "category" in qp and qp["category"]:
+        cat = unquote_plus(qp["category"])
+        st.session_state["w_category"] = cat if cat in categories_opts else "(Any)"
+
+    # ranges
+    if "hits" in qp and qp["hits"]:
+        r = parse_range(qp["hits"], int)
+        if r:
+            lo, hi = r
+            st.session_state["w_hits"] = (max(hmin, lo), min(hmax, hi))
+    if "price" in qp and qp["price"]:
+        r = parse_range(qp["price"], float)
+        if r:
+            lo, hi = r
+            st.session_state["w_price"] = (max(pmin, lo), min(pmax, hi))
+
+    # ordering / sort
+    if "order" in qp and qp["order"]:
+        st.session_state["w_order_by"] = qp["order"]
+    if "desc" in qp:
+        st.session_state["w_order_desc"] = (str(qp["desc"]) == "1")
+
+    # pagination + page size
+    if "page" in qp:
+        try:
+            st.session_state["page"] = max(0, int(qp["page"]))
+        except Exception:
+            pass
+    if "ps" in qp:
+        try:
+            st.session_state["w_page_size"] = int(qp["ps"])
+        except Exception:
+            pass
+
+    st.session_state["filters_applied"] = True
+    LOG.log("Hydrated from query params", qp)
+
+
+# ============================ Sidebar ============================
+
 with st.sidebar:
     st.markdown("### Diagnostics")
     VERBOSE_NET = st.toggle("Verbose network logs", value=True, help="Log each HTTP request/response meta")
     TEST_PING = st.button("Run connectivity test")
+
+    st.markdown("---")
+    if st.button("Reset filters"):
+        st.session_state["filters_applied"] = False
+        st.session_state["page"] = 0
+        # clear widget-backed state
+        for k in list(st.session_state.keys()):
+            if k.startswith("w_"):
+                del st.session_state[k]
+        qp_clear()
+        st.rerun()
 
 
 # ============================ HTTP helper ============================
@@ -244,7 +367,7 @@ def fetch_items(flt: dict, page: int, page_size: int) -> tuple[pd.DataFrame, int
 
 MAX_POINTS = 200  # last N timestamps per product URL
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=300, max_entries=512)
 def fetch_series(item_url: str, n: int = MAX_POINTS) -> pd.DataFrame:
     """
     Fetch the most recent N points for a product URL (primary table first, then fallback),
@@ -252,16 +375,14 @@ def fetch_series(item_url: str, n: int = MAX_POINTS) -> pd.DataFrame:
     """
     params = {
         "select": "timestamp,price",
-        "url": f"eq.{item_url}",   # let requests encode
-        "order": "timestamp.desc", # newest first
+        "url": f"eq.{item_url}",
+        "order": "timestamp.desc",  # newest first
         "limit": str(n),
     }
 
-    # Try primary table
     data, _ = http_get(f"{REST}/{PRICES_PRIMARY}", params, label="fetch_series:lastN:primary")
     df = pd.DataFrame(data)
 
-    # Fallback if needed
     if df.empty:
         data, _ = http_get(f"{REST}/{PRICES_FALLBACK}", params, label="fetch_series:lastN:fallback")
         df = pd.DataFrame(data)
@@ -269,7 +390,6 @@ def fetch_series(item_url: str, n: int = MAX_POINTS) -> pd.DataFrame:
     if df.empty:
         return df
 
-    # Make tz-aware and sort ASC for the chart
     ts = pd.to_datetime(df["timestamp"], utc=True, errors="coerce").dt.tz_convert("Asia/Beirut")
     df = df.assign(timestamp=ts).dropna(subset=["timestamp"])
     df = df.drop_duplicates(subset=["timestamp"], keep="last").sort_values("timestamp").reset_index(drop=True)
@@ -295,27 +415,30 @@ if TEST_PING:
 st.title("UAE Men Shoes — Current Global Lows")
 st.caption("Data live from Supabase REST API (materialized view + time series).")
 
+# Load options and hydrate widgets from URL (if present)
 brands, categories, pmin, pmax, hmin, hmax = load_options()
+hydrate_from_qp(brands, categories, pmin, pmax, hmin, hmax)
 
 with st.form("filters_form"):
     st.subheader("Filters (choose, then Apply)")
 
     c1, c2, c3 = st.columns(3)
     with c1:
-        chosen_brands = st.multiselect("Brands", options=brands)
-        category = st.selectbox("Category", options=["(Any)"] + categories, index=0)
+        chosen_brands = st.multiselect("Brands", options=brands, key="w_brands")
+        category = st.selectbox("Category", options=["(Any)"] + categories, index=0, key="w_category")
     with c2:
-        hits_range = st.slider("Min hits", hmin, max(hmin, hmax), (hmin, max(hmin, hmax)))
+        hits_range = st.slider("Min hits", hmin, max(hmin, hmax), (hmin, max(hmin, hmax)), key="w_hits")
         price_range = st.slider(
             "Price range (AED)",
             float(pmin),
             float(pmax or max(pmin, pmin + 1)),
             (float(pmin), float(pmax or max(pmin, pmin + 1))),
+            key="w_price",
         )
     with c3:
-        drop_prev = st.slider("Drop vs previous (%)", -100, 100, (-100, 100))
-        drop_30 = st.slider("Drop vs 30-day avg (%)", -100, 100, (-100, 100))
-        drop_90 = st.slider("Drop vs 90-day avg (%)", -100, 100, (-100, 100))
+        drop_prev = st.slider("Drop vs previous (%)", -100, 100, (-100, 100), key="w_drop_prev")
+        drop_30 = st.slider("Drop vs 30-day avg (%)", -100, 100, (-100, 100), key="w_drop_30")
+        drop_90 = st.slider("Drop vs 90-day avg (%)", -100, 100, (-100, 100), key="w_drop_90")
 
     st.markdown("---")
     cA, cB, cC = st.columns(3)
@@ -332,43 +455,56 @@ with st.form("filters_form"):
                 "days_since_first_low",
             ],
             index=0,
+            key="w_order_by",
         )
     with cB:
-        order_desc = st.toggle("Sort descending", True)
+        order_desc = st.toggle("Sort descending", True, key="w_order_desc")
     with cC:
-        page_size = st.select_slider("Page size", options=[12, 24, 48, 96], value=24)
+        page_size = st.select_slider("Page size", options=[12, 24, 48, 96], value=24, key="w_page_size")
 
-    submitted = st.form_submit_button("Apply Filters")
-    LOG.log("Form submitted", {"submitted": submitted})
+    submitted = st.form_submit_button("Apply Filters", use_container_width=True)
+    if submitted:
+        st.session_state["filters_applied"] = True
+        st.session_state["page"] = 0  # reset to first page
+        encode_filters_to_qp()        # persist in URL
+        LOG.log("Form submitted", {"submitted": True})
 
-if not submitted:
+# If filters weren't applied yet, don't render results
+if not st.session_state.get("filters_applied", False):
     st.info("↑ Set your filters, then click **Apply Filters**.")
     LOG.render()
     st.stop()
 
+# Build filter payload from current widget values (persisted by keys)
 flt = {
-    "brands": chosen_brands,
-    "category": None if category == "(Any)" else category,
-    "min_hits": hits_range,
-    "price_range": price_range,
-    "drop_prev": drop_prev,
-    "drop_30": drop_30,
-    "drop_90": drop_90,
-    "order_by": order_by,
-    "order_desc": order_desc,
+    "brands": st.session_state.get("w_brands", []),
+    "category": None if st.session_state.get("w_category") in (None, "(Any)") else st.session_state.get("w_category"),
+    "min_hits": st.session_state.get("w_hits"),
+    "price_range": st.session_state.get("w_price"),
+    "drop_prev": st.session_state.get("w_drop_prev"),
+    "drop_30": st.session_state.get("w_drop_30"),
+    "drop_90": st.session_state.get("w_drop_90"),
+    "order_by": st.session_state.get("w_order_by"),
+    "order_desc": st.session_state.get("w_order_desc", True),
 }
 
-# Pagination state
+# Pagination state (+ write to URL when changed)
 page = st.session_state.get("page", 0)
 prev_col, _, next_col = st.columns([1, 6, 1])
 with prev_col:
     if st.button("⟵ Prev", disabled=(page <= 0)):
-        page = max(0, page - 1)
+        st.session_state["page"] = max(0, page - 1)
+        encode_filters_to_qp()
+        st.rerun()
 with next_col:
     if st.button("Next ⟶"):
-        page = page + 1
-st.session_state["page"] = page
-LOG.log("Pagination", {"page": page})
+        st.session_state["page"] = page + 1
+        encode_filters_to_qp()
+        st.rerun()
+
+page = st.session_state.get("page", 0)
+page_size = st.session_state.get("w_page_size", 24)
+LOG.log("Pagination", {"page": page, "page_size": page_size})
 
 # Data fetch
 df, total = fetch_items(flt, page, page_size)
@@ -397,6 +533,7 @@ for r in range(rows):
                 left, right = st.columns([1, 2])
                 with left:
                     if row.get("image_link"):
+                        # Older Streamlit builds prefer use_column_width
                         st.image(row["image_link"], use_column_width=True)
                 with right:
                     st.markdown(f"**{row.get('brand','')}**")
