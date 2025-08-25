@@ -1,7 +1,6 @@
 # streamlit_app.py
 # UAE Men Shoes — Global Lows (Supabase REST API + Streamlit)
-# Diagnostics-heavy version: prints detailed boot + network logs under "Logs".
-# Requires: streamlit, pandas, requests, altair  (see requirements.txt)
+# Plotly charts + lazy-loaded price history + diagnostics logs
 
 import math
 import os
@@ -10,11 +9,11 @@ import time
 import json
 import platform
 from datetime import datetime, timezone
-# from urllib.parse import quote  # not needed after fix
 
 import pandas as pd
 import requests
 import streamlit as st
+import plotly.graph_objs as go
 
 
 # ============================ Diagnostics logger ============================
@@ -22,7 +21,6 @@ import streamlit as st
 class DiagLog:
     def __init__(self, name="logs"):
         self.name = name
-        # Keep across reruns
         if "_diag_log" not in st.session_state:
             st.session_state["_diag_log"] = []
         self.buf = st.session_state["_diag_log"]
@@ -48,7 +46,7 @@ class DiagLog:
             if not self.buf:
                 st.write("No logs yet.")
                 return
-            for e in self.buf[-200:]:  # cap rendering
+            for e in self.buf[-200:]:
                 st.write(f"[{e['ts']}] {e['msg']}")
                 if "data" in e:
                     try:
@@ -59,14 +57,12 @@ class DiagLog:
 
 LOG = DiagLog()
 
-
 def safe_pkg_version(mod_name):
     try:
         mod = __import__(mod_name)
         return getattr(mod, "__version__", "unknown")
     except Exception:
         return "missing"
-
 
 def boot_diag():
     LOG.clear()
@@ -82,6 +78,7 @@ def boot_diag():
             "streamlit": safe_pkg_version("streamlit"),
             "pandas": safe_pkg_version("pandas"),
             "requests": safe_pkg_version("requests"),
+            "plotly": safe_pkg_version("plotly"),
         },
     )
 
@@ -110,8 +107,9 @@ if not SUPABASE_URL or not SUPABASE_ANON_KEY:
     st.stop()
 
 REST = f"{SUPABASE_URL}/rest/v1"
-MV = "nam_uae_men_shoes_at_global_low"         # materialized view
-PRICES = 'nam-uae-men-shoes-prices'            # raw time-series table
+MV = "nam_uae_men_shoes_at_global_low"          # materialized view
+PRICES_PRIMARY = 'nam-uae-men-shoes-prices'     # likely on your cloud DB
+PRICES_FALLBACK = 'prices'                      # used in your local app
 
 HDR = {
     "apikey": SUPABASE_ANON_KEY,
@@ -119,7 +117,7 @@ HDR = {
     "Prefer": "count=exact",
 }
 
-# User toggles for diagnostics
+# Sidebar diagnostics toggles
 with st.sidebar:
     st.markdown("### Diagnostics")
     VERBOSE_NET = st.toggle("Verbose network logs", value=True, help="Log each HTTP request/response meta")
@@ -165,18 +163,16 @@ def http_get(url: str, params: dict, label: str = "") -> tuple[list, str | None]
         return js, r.headers.get("content-range")
 
     except requests.RequestException as e:
-        dur = time.perf_counter() - t0
-        LOG.log("Network exception", {"label": label, "error": str(e), "elapsed_s": round(dur, 3)})
+        LOG.log("Network exception", {"label": label, "error": str(e)})
         st.error(f"Network error: {e}")
         st.stop()
 
 
-# ============================ Small utilities ============================
+# ============================ Utilities ============================
 
 def pg_in(values: list[str]) -> str:
     esc = [v.replace('"', '""') for v in values]
     return 'in.(' + ",".join([f'"{e}"' for e in esc]) + ')'
-
 
 def pct_fmt(x) -> str:
     try:
@@ -184,8 +180,6 @@ def pct_fmt(x) -> str:
     except Exception:
         return "—"
 
-
-# Compatibility helper for st.image keyword changes across versions
 def img_show(url: str):
     try:
         st.image(url, use_container_width=True)
@@ -193,16 +187,15 @@ def img_show(url: str):
         st.image(url, use_column_width=True)
 
 
-# ============================ Option loaders (cached) ============================
+# ============================ Data loaders (cached) ============================
 
 @st.cache_data(ttl=300)
 def load_options(limit_first_page: int = 2000):
-    label = "load_options"
     LOG.log("load_options: fetching", {"limit": limit_first_page})
     data, _ = http_get(
         f"{REST}/{MV}",
         {"select": "brand,category,latest_price,min_hits", "limit": str(limit_first_page)},
-        label=label,
+        label="load_options",
     )
     df = pd.DataFrame(data)
     LOG.log("load_options: fetched rows", {"rows": len(df)})
@@ -227,7 +220,7 @@ def build_params(flt: dict, limit: int, offset: int) -> dict:
         "order": f"{flt['order_by']}.{ 'desc' if flt['order_desc'] else 'asc'}",
         "limit": str(limit),
         "offset": str(offset),
-        # removed "count": "exact" (Prefer header already set)
+        # Prefer: count=exact is already in headers
     }
     if flt["brands"]:
         p["brand"] = pg_in(flt["brands"])
@@ -260,20 +253,14 @@ def fetch_items(flt: dict, page: int, page_size: int) -> tuple[pd.DataFrame, int
     df = pd.DataFrame(data)
     LOG.log(
         "fetch_items result",
-        {
-            "rows": len(df),
-            "total": total,
-            "page": page,
-            "page_size": page_size,
-            "elapsed_s": round(time.perf_counter() - t0, 3),
-        },
+        {"rows": len(df), "total": total, "page": page, "page_size": page_size, "elapsed_s": round(time.perf_counter() - t0, 3)},
     )
     return df, total
 
 
 @st.cache_data(ttl=300)
-def fetch_series(item_url: str, limit: int = 5000) -> pd.DataFrame:
-    # IMPORTANT: don't pre-quote; requests encodes automatically.
+def fetch_series_from(table_name: str, item_url: str, limit: int = 5000) -> pd.DataFrame:
+    # Don't pre-quote item_url; requests will handle encoding.
     params = {
         "select": "timestamp,price",
         "url": f"eq.{item_url}",
@@ -281,17 +268,27 @@ def fetch_series(item_url: str, limit: int = 5000) -> pd.DataFrame:
         "limit": str(limit),
     }
     t0 = time.perf_counter()
-    data, _ = http_get(f"{REST}/{PRICES}", params, label="fetch_series")
+    data, _ = http_get(f"{REST}/{table_name}", params, label=f"fetch_series:{table_name}")
     df = pd.DataFrame(data)
     if not df.empty:
-        # Make tz-aware in UTC then convert to Beirut
         ts = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
         df["timestamp"] = ts.dt.tz_convert("Asia/Beirut")
     LOG.log("fetch_series result", {
+        "table": table_name,
         "url_preview": item_url[:60] + "…",
         "rows": len(df),
         "elapsed_s": round(time.perf_counter() - t0, 3)
     })
+    return df
+
+
+@st.cache_data(ttl=300)
+def fetch_series(item_url: str, limit: int = 5000) -> pd.DataFrame:
+    # Try your primary time-series table; if empty, try the local-style 'prices' table.
+    df = fetch_series_from(PRICES_PRIMARY, item_url, limit)
+    if df.empty:
+        LOG.log("Primary prices table returned 0 rows; trying fallback", {"primary": PRICES_PRIMARY, "fallback": PRICES_FALLBACK})
+        df = fetch_series_from(PRICES_FALLBACK, item_url, limit)
     return df
 
 
@@ -433,34 +430,34 @@ for r in range(rows):
                     st.metric("90d Δ", pct_fmt(row.get("delta_vs_90d_pct")))
                     st.caption(f"2nd-lowest gap: {pct_fmt(row.get('gap_to_second_lowest_pct'))}")
 
-                # ---- On-demand price history (lazy loaded to protect DB) ----
-                with st.expander("Price history (AED)", expanded=False):
-                    clicked_flag = f"clicked_{i}"
-                    load_key = f"load_hist_{i}"
-                    if st.button("Load price history", key=load_key, use_container_width=True):
-                        st.session_state[clicked_flag] = True
-
-                    if st.session_state.get(clicked_flag):
+                # ---- Lazy-loaded Plotly price history (no DB hit until opted in) ----
+                with st.expander("📈 Price History (AED)", expanded=False):
+                    chk_key = f"show_hist_{i}"
+                    show = st.checkbox("Show price history", key=chk_key)
+                    if show:
                         with st.spinner("Fetching history…"):
                             ts = fetch_series(row["url"])
                         if ts.empty:
                             st.info("No time-series data.")
                         else:
-                            import altair as alt
-                            chart = (
-                                alt.Chart(ts)
-                                .mark_line()
-                                .encode(
-                                    x=alt.X("timestamp:T", title="Time (Asia/Beirut)"),
-                                    y=alt.Y("price:Q", title="Price (AED)"),
-                                    tooltip=["timestamp:T", "price:Q"],
-                                )
-                                .properties(height=220)
+                            fig = go.Figure()
+                            fig.add_trace(go.Scatter(
+                                x=ts["timestamp"],
+                                y=ts["price"],
+                                mode="lines+markers",
+                                name="Price",
+                            ))
+                            fig.update_layout(
+                                title="Price Over Time",
+                                xaxis_title="Date (Asia/Beirut)",
+                                yaxis_title="AED",
+                                margin=dict(l=10, r=10, t=30, b=10),
+                                height=300,
                             )
-                            st.altair_chart(chart, use_container_width=True)
-                        LOG.log("Rendered series chart (on-demand)", {
+                            st.plotly_chart(fig, use_container_width=True)
+                        LOG.log("Rendered series chart (lazy, plotly)", {
                             "url_preview": row["url"][:60] + "…",
-                            "clicked_key": load_key
+                            "checked": True
                         })
 
 # Final: render logs
