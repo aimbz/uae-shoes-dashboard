@@ -1,4 +1,5 @@
-
+# Overwrite the previous file with a corrected version (fixes SyntaxError by moving http_get above sidebar).
+code = r'''
 # streamlit_app.py
 # UAE Men Shoes — Global Lows (Supabase REST API + Streamlit)
 # Robust filters persisted in URL + Plotly charts (last 200 points) + diagnostics
@@ -7,6 +8,7 @@
 # - Survives reconnects (rehydrates from URL)
 # - No duplicate widget IDs
 # - No default+session_state widget conflicts
+# - Fixed SyntaxError by defining http_get before sidebar usage
 # Requirements: streamlit, pandas, requests, plotly
 
 import math
@@ -238,37 +240,7 @@ def hydrate_from_qp(brands_opts, categories_opts, pmin, pmax, hmin, hmax):
     LOG.log("Hydrated from query params", qp)
 
 
-# ============================ Sidebar (single block; unique keys) ============================
-
-with st.sidebar:
-    st.markdown("### Diagnostics")
-    VERBOSE_NET = st.toggle(
-        "Verbose network logs",
-        value=True,
-        help="Log each HTTP request/response meta",
-        key="t_verbose",
-    )
-
-    if st.button("Run connectivity test", key="btn_ping"):
-        try:
-            LOG.log("Ping: MV limit=1")
-            sample, cr = http_get := None, None  # placeholder to avoid linter warning
-        except Exception:
-            pass  # will be replaced below
-
-    st.markdown("---")
-    if st.button("Reset filters", key="btn_reset"):
-        st.session_state["filters_applied"] = False
-        st.session_state["page"] = 0
-        # clear widget-backed state
-        for k in list(st.session_state.keys()):
-            if k.startswith("w_"):
-                del st.session_state[k]
-        qp_clear()
-        st.rerun()
-
-
-# ============================ HTTP helper ============================
+# ============================ HTTP helper (defined BEFORE sidebar) ============================
 
 def http_get(url: str, params: dict, label: str = "") -> tuple[list, str | None]:
     t0 = time.perf_counter()
@@ -304,32 +276,6 @@ def http_get(url: str, params: dict, label: str = "") -> tuple[list, str | None]
         LOG.log("Network exception", {"label": label, "error": str(e)})
         st.error(f"Network error: {e}")
         st.stop()
-
-
-# After defining http_get, wire up the sidebar ping button properly
-with st.sidebar:
-    if st.session_state.get("btn_ping", False):
-        try:
-            LOG.log("Ping: MV limit=1")
-            sample, cr = http_get(f"{REST}/{MV}", {"select": "brand,latest_price", "limit": "1"}, label="ping_mv")
-            LOG.log("Ping MV ok", {"content_range": cr, "sample_rows": len(sample)})
-            st.success("Connectivity OK (MV). See logs below.")
-        except Exception as e:
-            LOG.log("Ping MV failed", {"error": str(e)})
-            st.error(f"Ping failed: {e}")
-
-
-# ============================ Utilities ============================
-
-def pg_in(values: list[str]) -> str:
-    esc = [v.replace('"', '""') for v in values]
-    return 'in.(' + ",".join([f'"{e}"' for e in esc]) + ')'
-
-def pct_fmt(x) -> str:
-    try:
-        return f"{float(x)*100:.1f}%"
-    except Exception:
-        return "—"
 
 
 # ============================ Data loaders (cached) ============================
@@ -432,6 +378,19 @@ def fetch_series(item_url: str, n: int = MAX_POINTS) -> pd.DataFrame:
     return df
 
 
+# ============================ Utilities ============================
+
+def pg_in(values: list[str]) -> str:
+    esc = [v.replace('"', '""') for v in values]
+    return 'in.(' + ",".join([f'"{e}"' for e in esc]) + ')'
+
+def pct_fmt(x) -> str:
+    try:
+        return f"{float(x)*100:.1f}%"
+    except Exception:
+        return "—"
+
+
 # ============================ Stateful widget helpers ============================
 
 def slider_stateful(key, label, min_value, max_value, value_default, **kwargs):
@@ -463,6 +422,39 @@ def select_slider_stateful(key, label, options, value_default=None, **kwargs):
         return st.select_slider(label, options=options, key=key, **kwargs)
     else:
         return st.select_slider(label, options=options, value=value_default, key=key, **kwargs)
+
+
+# ============================ Sidebar (single block; unique keys) ============================
+
+with st.sidebar:
+    st.markdown("### Diagnostics")
+    st.toggle(
+        "Verbose network logs",
+        value=True,
+        help="Log each HTTP request/response meta",
+        key="t_verbose",
+    )
+
+    if st.button("Run connectivity test", key="btn_ping"):
+        try:
+            LOG.log("Ping: MV limit=1")
+            sample, cr = http_get(f"{REST}/{MV}", {"select": "brand,latest_price", "limit": "1"}, label="ping_mv")
+            LOG.log("Ping MV ok", {"content_range": cr, "sample_rows": len(sample)})
+            st.success("Connectivity OK (MV). See logs below.")
+        except Exception as e:
+            LOG.log("Ping MV failed", {"error": str(e)})
+            st.error(f"Ping failed: {e}")
+
+    st.markdown("---")
+    if st.button("Reset filters", key="btn_reset"):
+        st.session_state["filters_applied"] = False
+        st.session_state["page"] = 0
+        # clear widget-backed state
+        for k in list(st.session_state.keys()):
+            if k.startswith("w_"):
+                del st.session_state[k]
+        qp_clear()
+        st.rerun()
 
 
 # ============================ UI ============================
