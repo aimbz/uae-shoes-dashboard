@@ -1,7 +1,7 @@
 # streamlit_app.py
 # UAE Men Shoes — Global Lows (Supabase REST API + Streamlit)
 # Plotly charts + last 200 points per URL + diagnostics
-# Robust to reruns/reconnects: filters & page persist via st.query_params
+# Robust to reruns/reconnects: filters & page persist via query params (no double-encode)
 
 import math
 import os
@@ -10,7 +10,6 @@ import time
 import json
 import platform
 from datetime import datetime, timezone
-from urllib.parse import quote_plus, unquote_plus
 
 import pandas as pd
 import requests
@@ -119,22 +118,25 @@ HDR = {
     "Prefer": "count=exact",
 }
 
-# ============================ Persistent state & helpers ============================
+# ============================ Persistent state & query param helpers ============================
 
 if "filters_applied" not in st.session_state:
     st.session_state["filters_applied"] = False
 if "page" not in st.session_state:
     st.session_state["page"] = 0
 
-def qp_get():
+def qp_get() -> dict:
+    """Return query params as a simple dict[str,str]. Works across Streamlit versions."""
     try:
-        return dict(st.query_params)
+        # Newer Streamlit
+        return {k: v for k, v in st.query_params.items()}
     except Exception:
-        # Fallback for older builds
-        return st.experimental_get_query_params()
+        # Older API returns dict[str,list[str]]
+        raw = st.experimental_get_query_params()
+        return {k: (v[0] if isinstance(v, list) and v else "") for k, v in raw.items()}
 
 def qp_set(new_params: dict):
-    # Convert lists to scalars
+    """Set/replace query params from scalars; let Streamlit handle encoding (no manual quoting)."""
     qp = {k: (",".join(v) if isinstance(v, list) else str(v)) for k, v in new_params.items() if v is not None}
     try:
         st.query_params.update(qp)
@@ -148,28 +150,32 @@ def qp_clear():
         st.experimental_set_query_params()
 
 def encode_filters_to_qp():
-    # Build query params from current widget state
+    """Mirror current widget state into the URL (without double-encoding, and ignoring '(Any)')."""
     brands = st.session_state.get("w_brands", [])
-    category = st.session_state.get("w_category") or ""
+    category = st.session_state.get("w_category")
+    if not category or category == "(Any)":
+        category_param = ""
+    else:
+        category_param = category
+
     hits = st.session_state.get("w_hits")
     price = st.session_state.get("w_price")
-    order = st.session_state.get("w_order_by")
+    order = st.session_state.get("w_order_by") or ""
     desc = 1 if st.session_state.get("w_order_desc", True) else 0
     page = st.session_state.get("page", 0)
     ps = st.session_state.get("w_page_size", 24)
 
-    qp = {
+    qp_set({
         "applied": "1",
-        "brands": ",".join([quote_plus(b) for b in brands]) if brands else "",
-        "category": quote_plus(category) if category else "",
+        "brands": ",".join(brands) if brands else "",
+        "category": category_param,
         "hits": f"{hits[0]}-{hits[1]}" if hits else "",
         "price": f"{price[0]}-{price[1]}" if price else "",
-        "order": order or "",
+        "order": order,
         "desc": str(desc),
         "page": str(page),
         "ps": str(ps),
-    }
-    qp_set(qp)
+    })
 
 def parse_range(s: str, cast=float):
     try:
@@ -180,48 +186,43 @@ def parse_range(s: str, cast=float):
 
 def hydrate_from_qp(brands_opts, categories_opts, pmin, pmax, hmin, hmax):
     qp = qp_get()
-    if not qp or (qp.get("applied") != "1" and not any(k in qp for k in ("brands", "category", "order"))):
+    if not qp or (qp.get("applied") != "1" and not any(qp.get(k) for k in ("brands","category","order","price","hits"))):
         return  # nothing to hydrate
 
     # brands
-    if "brands" in qp and qp["brands"]:
-        decoded = [unquote_plus(b) for b in qp["brands"].split(",") if b]
-        st.session_state["w_brands"] = [b for b in decoded if b in brands_opts]
+    if qp.get("brands"):
+        picked = [b for b in qp["brands"].split(",") if b]
+        st.session_state["w_brands"] = [b for b in picked if b in brands_opts]
 
     # category
-    if "category" in qp and qp["category"]:
-        cat = unquote_plus(qp["category"])
-        st.session_state["w_category"] = cat if cat in categories_opts else "(Any)"
+    cat = qp.get("category", "")
+    st.session_state["w_category"] = cat if cat in categories_opts else "(Any)"
 
     # ranges
-    if "hits" in qp and qp["hits"]:
-        r = parse_range(qp["hits"], int)
-        if r:
-            lo, hi = r
-            st.session_state["w_hits"] = (max(hmin, lo), min(hmax, hi))
-    if "price" in qp and qp["price"]:
-        r = parse_range(qp["price"], float)
-        if r:
-            lo, hi = r
-            st.session_state["w_price"] = (max(pmin, lo), min(pmax, hi))
+    r = parse_range(qp.get("hits",""), int)
+    if r:
+        lo, hi = r
+        st.session_state["w_hits"] = (max(hmin, lo), min(hmax, hi))
+    r = parse_range(qp.get("price",""), float)
+    if r:
+        lo, hi = r
+        st.session_state["w_price"] = (max(pmin, lo), min(pmax, hi))
 
     # ordering / sort
-    if "order" in qp and qp["order"]:
+    if qp.get("order"):
         st.session_state["w_order_by"] = qp["order"]
     if "desc" in qp:
         st.session_state["w_order_desc"] = (str(qp["desc"]) == "1")
 
     # pagination + page size
-    if "page" in qp:
-        try:
-            st.session_state["page"] = max(0, int(qp["page"]))
-        except Exception:
-            pass
-    if "ps" in qp:
-        try:
-            st.session_state["w_page_size"] = int(qp["ps"])
-        except Exception:
-            pass
+    try:
+        st.session_state["page"] = max(0, int(qp.get("page","0")))
+    except Exception:
+        pass
+    try:
+        st.session_state["w_page_size"] = int(qp.get("ps","24"))
+    except Exception:
+        pass
 
     st.session_state["filters_applied"] = True
     LOG.log("Hydrated from query params", qp)
@@ -466,7 +467,7 @@ with st.form("filters_form"):
     if submitted:
         st.session_state["filters_applied"] = True
         st.session_state["page"] = 0  # reset to first page
-        encode_filters_to_qp()        # persist in URL
+        encode_filters_to_qp()        # persist in URL (no double-encode)
         LOG.log("Form submitted", {"submitted": True})
 
 # If filters weren't applied yet, don't render results
