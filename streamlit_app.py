@@ -30,7 +30,7 @@ class DiagLog:
         entry = {"ts": ts, "msg": str(msg)}
         if data is not None:
             try:
-                json.dumps(data)  # ensure JSON-serializable for pretty view
+                json.dumps(data)
                 entry["data"] = data
             except Exception:
                 entry["data"] = str(data)
@@ -133,11 +133,10 @@ def http_get(url: str, params: dict, label: str = "") -> tuple[list, str | None]
         LOG.log("HTTP GET start", {"label": label, "url": url, "params": params})
     try:
         r = requests.get(url, params=params, headers=HDR, timeout=60)
-        dur = time.perf_counter() - t0
         meta = {
             "label": label,
             "status_code": r.status_code,
-            "elapsed_s": round(dur, 3),
+            "elapsed_s": round(time.perf_counter() - t0, 3),
             "ok": r.ok,
             "url": r.url,
             "content_length": len(r.content or b""),
@@ -179,12 +178,6 @@ def pct_fmt(x) -> str:
         return f"{float(x)*100:.1f}%"
     except Exception:
         return "—"
-
-def img_show(url: str):
-    try:
-        st.image(url, use_container_width=True)
-    except TypeError:
-        st.image(url, use_column_width=True)
 
 
 # ============================ Data loaders (cached) ============================
@@ -260,10 +253,9 @@ def fetch_items(flt: dict, page: int, page_size: int) -> tuple[pd.DataFrame, int
 
 @st.cache_data(ttl=300)
 def fetch_series_from(table_name: str, item_url: str, limit: int = 5000) -> pd.DataFrame:
-    # Don't pre-quote item_url; requests will handle encoding.
     params = {
         "select": "timestamp,price",
-        "url": f"eq.{item_url}",
+        "url": f"eq.{item_url}",   # let requests encode
         "order": "timestamp.asc",
         "limit": str(limit),
     }
@@ -284,7 +276,6 @@ def fetch_series_from(table_name: str, item_url: str, limit: int = 5000) -> pd.D
 
 @st.cache_data(ttl=300)
 def fetch_series(item_url: str, limit: int = 5000) -> pd.DataFrame:
-    # Try your primary time-series table; if empty, try the local-style 'prices' table.
     df = fetch_series_from(PRICES_PRIMARY, item_url, limit)
     if df.empty:
         LOG.log("Primary prices table returned 0 rows; trying fallback", {"primary": PRICES_PRIMARY, "fallback": PRICES_FALLBACK})
@@ -412,7 +403,7 @@ for r in range(rows):
                 left, right = st.columns([1, 2])
                 with left:
                     if row.get("image_link"):
-                        img_show(row["image_link"])
+                        st.image(row["image_link"], use_column_width=True)
                 with right:
                     st.markdown(f"**{row.get('brand','')}**")
                     st.markdown(row.get("title", ""))
