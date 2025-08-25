@@ -325,20 +325,39 @@ def http_get(url: str, params: dict, label: str = "") -> tuple[list, str | None]
 # ============================ Data loaders (cached) ============================
 
 @st.cache_data(ttl=300)
-def load_options():
-    # Pull MANY rows but only the needed columns, ordered, to collect uniques reliably
-    brands_raw, _ = http_get(
-        f"{REST}/{MV}",
-        {"select": "brand", "brand": "not.is.null", "order": "brand.asc", "limit": "10000"},
-        label="load_brands",
-    )
-    cats_raw, _ = http_get(
-        f"{REST}/{MV}",
-        {"select": "category", "category": "not.is.null", "order": "category.asc", "limit": "10000"},
-        label="load_categories",
-    )
+def _scan_distinct_values_from_mv(col: str, page_size: int = 2000) -> list[str]:
+    """Read ALL non-null values for a column from the MV by paging."""
+    values: list[str] = []
+    offset = 0
+    while True:
+        params = {
+            "select": col,
+            col: "not.is.null",              # correct PostgREST syntax
+            "order": f"{col}.asc",
+            "limit": str(page_size),
+            "offset": str(offset),
+        }
+        chunk, _ = http_get(f"{REST}/{MV}", params, label=f"scan:{col}")
+        if not chunk:
+            break
+        values.extend([r.get(col) for r in chunk if r.get(col) is not None])
+        # stop when fewer than a full page came back
+        if len(chunk) < page_size:
+            break
+        offset += page_size
+    # unique while preserving as strings (raw values kept for filtering)
+    uniq = sorted({str(v) for v in values})
+    LOG.log(f"scan {col}", {"pagesize": page_size, "total_vals": len(values), "unique": len(uniq)})
+    return uniq
 
-    # Get ranges for sliders (single-row min/max fetches)
+
+@st.cache_data(ttl=300)
+def load_options():
+    # Read ALL brands/categories from the MATERIALIZED VIEW (not the prices table)
+    brands = _scan_distinct_values_from_mv("brand", page_size=2000)
+    categories = _scan_distinct_values_from_mv("category", page_size=2000)
+
+    # Slider ranges via single-row min/max queries (cheap)
     def minmax(col, cast=float):
         lo_rows, _ = http_get(f"{REST}/{MV}", {"select": col, "order": f"{col}.asc", "limit": "1"}, label=f"min_{col}")
         hi_rows, _ = http_get(f"{REST}/{MV}", {"select": col, "order": f"{col}.desc", "limit": "1"}, label=f"max_{col}")
@@ -349,31 +368,14 @@ def load_options():
     pmin, pmax = minmax("latest_price", float)
     hmin, hmax = minmax("min_hits", int)
 
-    # Build unique lists
-    bdf = pd.DataFrame(brands_raw)
-    cdf = pd.DataFrame(cats_raw)
-    brands = (
-        bdf.get("brand", pd.Series(dtype=str))
-           .dropna()
-           .astype(str)
-           .unique()
-           .tolist()
-    )
-    categories = (
-        cdf.get("category", pd.Series(dtype=str))
-           .dropna()
-           .astype(str)
-           .unique()
-           .tolist()
-    )
-
-    LOG.log("load_options (full-scan lists)", {
+    LOG.log("load_options (paged MV)", {
         "brands_count": len(brands),
         "categories_count": len(categories),
         "price_range": [pmin, pmax],
         "hits_range": [hmin, hmax],
     })
-    return sorted(brands), sorted(categories), float(pmin), float(pmax), int(hmin), int(hmax)
+    return brands, categories, float(pmin), float(pmax), int(hmin), int(hmax)
+
 
 
 
@@ -705,6 +707,7 @@ for r in range(rows):
 
 # Final: logs
 LOG.render()
+
 
 
 
