@@ -44,16 +44,19 @@ class DiagLog:
         self.buf = st.session_state["_diag_log"]
 
     def render(self):
-        with st.expander("🧰 Logs (diagnostics)", expanded=True):
-            st.caption("Detailed boot/runtime logs (safe: no secrets)")
-            if not self.buf:
-                st.write("No logs yet.")
-                return
-            for e in self.buf[-200:]:  # cap rendering
-                st.write(f"[{e['ts']}] {e['msg']}")
-                if "data" in e:
-                    with st.expander("details", expanded=False):
-                        st.code(json.dumps(e["data"], indent=2))
+    with st.expander("🧰 Logs (diagnostics)", expanded=True):
+        st.caption("Detailed boot/runtime logs (safe: no secrets)")
+        if not self.buf:
+            st.write("No logs yet.")
+            return
+        for e in self.buf[-200:]:  # cap rendering
+            st.write(f"[{e['ts']}] {e['msg']}")
+            if "data" in e:
+                # Avoid nesting expander inside expander (Streamlit error)
+                try:
+                    st.code(json.dumps(e["data"], indent=2))
+                except Exception:
+                    st.code(str(e["data"]))
 
 
 LOG = DiagLog()
@@ -441,3 +444,4 @@ for r in range(rows):
 
 # Final: render logs
 LOG.render()
+
