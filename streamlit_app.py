@@ -325,27 +325,57 @@ def http_get(url: str, params: dict, label: str = "") -> tuple[list, str | None]
 # ============================ Data loaders (cached) ============================
 
 @st.cache_data(ttl=300)
-def load_options(limit_first_page: int = 10000):
-    LOG.log("load_options: fetching", {"limit": limit_first_page})
-    data, _ = http_get(
+def load_options():
+    # Pull MANY rows but only the needed columns, ordered, to collect uniques reliably
+    brands_raw, _ = http_get(
         f"{REST}/{MV}",
-        {"select": "brand,category,latest_price,min_hits", "limit": str(limit_first_page)},
-        label="load_options",
+        {"select": "brand", "brand": "is.not.null", "order": "brand.asc", "limit": "10000"},
+        label="load_brands",
     )
-    df = pd.DataFrame(data)
-    LOG.log("load_options: fetched rows", {"rows": len(df)})
+    cats_raw, _ = http_get(
+        f"{REST}/{MV}",
+        {"select": "category", "category": "is.not.null", "order": "category.asc", "limit": "10000"},
+        label="load_categories",
+    )
+    # Get ranges for sliders (min/max) without scanning everything:
+    # ask for the single min & max rows of each column
+    def minmax(col, cast=float):
+        lo_rows, _ = http_get(f"{REST}/{MV}", {"select": col, "order": f"{col}.asc", "limit": "1"}, label=f"min_{col}")
+        hi_rows, _ = http_get(f"{REST}/{MV}", {"select": col, "order": f"{col}.desc", "limit": "1"}, label=f"max_{col}")
+        lo = cast(lo_rows[0][col]) if lo_rows and lo_rows[0].get(col) is not None else (0 if cast is int else 0.0)
+        hi = cast(hi_rows[0][col]) if hi_rows and hi_rows[0].get(col) is not None else (0 if cast is int else 0.0)
+        return lo, hi
 
-    brands = sorted([b for b in df.get("brand", pd.Series(dtype=str)).dropna().unique().tolist() if b])
-    cats = sorted([c for c in df.get("category", pd.Series(dtype=str)).dropna().unique().tolist() if c]) or ["Men UAE shoes"]
+    pmin, pmax = minmax("latest_price", float)
+    hmin, hmax = minmax("min_hits", int)
 
-    if df.empty:
-        LOG.log("load_options: empty dataframe")
-        return brands, cats, 0.0, 0.0, 0, 0
+    # Build unique lists (keep raw values), but we’ll *display* trimmed text
+    bdf = pd.DataFrame(brands_raw)
+    cdf = pd.DataFrame(cats_raw)
+    brands = (
+        bdf.get("brand", pd.Series(dtype=str))
+           .dropna()
+           .astype(str)
+           .unique()
+           .tolist()
+    )
+    categories = (
+        cdf.get("category", pd.Series(dtype=str))
+           .dropna()
+           .astype(str)
+           .unique()
+           .tolist()
+    )
 
-    pmin, pmax = float(df["latest_price"].min()), float(df["latest_price"].max())
-    hmin, hmax = int(df["min_hits"].min()), int(df["min_hits"].max())
-    LOG.log("load_options: computed ranges", {"pmin": pmin, "pmax": pmax, "hmin": hmin, "hmax": hmax})
-    return brands, cats, pmin, pmax, hmin, hmax
+    # Log for debugging
+    LOG.log("load_options (full-scan lists)", {
+        "brands_count": len(brands),
+        "categories_count": len(categories),
+        "price_range": [pmin, pmax],
+        "hits_range": [hmin, hmax],
+    })
+    return sorted(brands), sorted(categories), float(pmin), float(pmax), int(hmin), int(hmax)
+
 
 
 # ============================ Utilities ============================
@@ -509,7 +539,13 @@ with st.form("filters_form"):
 
     c1, c2, c3 = st.columns(3)
     with c1:
-        chosen_brands = multiselect_stateful("w_brands", "Brands", options=brands)
+        chosen_brands = multiselect_stateful(
+    "w_brands",
+    "Brands",
+    options=brands,
+    default_default=None,
+    format_func=lambda s: s.strip() if isinstance(s, str) else s
+)
         category = selectbox_stateful("w_category", "Category", options=["(Any)"] + categories, index_default=0)
     with c2:
         hits_range = slider_stateful("w_hits", "Min hits", hmin, max(hmin, hmax), (hmin, max(hmin, hmax)))
@@ -669,4 +705,5 @@ for r in range(rows):
 
 # Final: logs
 LOG.render()
+
 
