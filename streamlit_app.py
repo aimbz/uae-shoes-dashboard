@@ -1,18 +1,17 @@
-# Overwrite the previous file with a corrected version (fixes SyntaxError by moving http_get above sidebar).
-code = r'''
 # streamlit_app.py
 # UAE Men Shoes — Global Lows (Supabase REST API + Streamlit)
-# Robust filters persisted in URL + Plotly charts (last 200 points) + diagnostics
-# Fixes:
-# - No resets when opening/closing expanders (session_state flag)
-# - Survives reconnects (rehydrates from URL)
-# - No duplicate widget IDs
+# Stable filters persisted in URL + Plotly charts (last 200 points) + diagnostics
+# Key fixes:
+# - Disable file watcher to avoid "inotify instance limit reached"
+# - Single sidebar (no duplicate widget IDs)
 # - No default+session_state widget conflicts
-# - Fixed SyntaxError by defining http_get before sidebar usage
-# Requirements: streamlit, pandas, requests, plotly
+# - Filters/page survive reruns + reconnects; URL stays in sync
+
+# --- Disable Streamlit file watcher (must be BEFORE importing streamlit) ---
+import os
+os.environ["STREAMLIT_SERVER_FILE_WATCHER_TYPE"] = "none"  # avoids inotify limit
 
 import math
-import os
 import sys
 import time
 import json
@@ -21,8 +20,8 @@ from datetime import datetime, timezone
 
 import pandas as pd
 import requests
-import streamlit as st
 import plotly.graph_objs as go
+import streamlit as st  # import AFTER setting env var above
 
 
 # ============================ Diagnostics logger ============================
@@ -117,17 +116,14 @@ if not SUPABASE_URL or not SUPABASE_ANON_KEY:
 
 REST = f"{SUPABASE_URL}/rest/v1"
 MV = "nam_uae_men_shoes_at_global_low"          # materialized view
-PRICES_PRIMARY = 'nam-uae-men-shoes-prices'     # cloud table
-PRICES_FALLBACK = 'prices'                      # local/dev table
+PRICES_PRIMARY = "nam-uae-men-shoes-prices"     # cloud table
+PRICES_FALLBACK = "prices"                      # local/dev table
 
 HDR = {
     "apikey": SUPABASE_ANON_KEY,
     "Authorization": f"Bearer {SUPABASE_ANON_KEY}",
     "Prefer": "count=exact",
 }
-
-# Verbose flag default (overridden by sidebar toggle later)
-VERBOSE_NET = True
 
 
 # ============================ Persistent state & query param helpers ============================
@@ -138,7 +134,6 @@ if "page" not in st.session_state:
     st.session_state["page"] = 0
 
 def qp_get() -> dict:
-    """Return query params as a simple dict[str,str]. Works across Streamlit versions."""
     try:
         return {k: v for k, v in st.query_params.items()}
     except Exception:
@@ -146,7 +141,6 @@ def qp_get() -> dict:
         return {k: (v[0] if isinstance(v, list) and v else "") for k, v in raw.items()}
 
 def qp_set(new_params: dict):
-    """Set/replace query params from scalars; let Streamlit handle encoding."""
     qp = {k: (",".join(v) if isinstance(v, list) else str(v)) for k, v in new_params.items() if v is not None}
     try:
         st.query_params.update(qp)
@@ -160,7 +154,6 @@ def qp_clear():
         st.experimental_set_query_params()
 
 def encode_filters_to_qp():
-    """Mirror current widget state into the URL (ignore '(Any)')."""
     brands = st.session_state.get("w_brands", [])
     category = st.session_state.get("w_category")
     category_param = "" if (not category or category == "(Any)") else category
@@ -191,40 +184,35 @@ def parse_range(s: str, cast=float):
         return None
 
 def hydrate_from_qp(brands_opts, categories_opts, pmin, pmax, hmin, hmax):
-    """Populate session_state from URL ONLY if keys are not already set."""
     qp = qp_get()
     if not qp or (qp.get("applied") != "1" and not any(qp.get(k) for k in ("brands","category","order","price","hits"))):
         return
 
-    # brands
     if "w_brands" not in st.session_state and qp.get("brands"):
         picked = [b for b in qp["brands"].split(",") if b]
         st.session_state["w_brands"] = [b for b in picked if b in brands_opts]
 
-    # category
     if "w_category" not in st.session_state:
         cat = qp.get("category", "")
         st.session_state["w_category"] = cat if cat in categories_opts else "(Any)"
 
-    # ranges
     if "w_hits" not in st.session_state:
         r = parse_range(qp.get("hits",""), int)
         if r:
             lo, hi = r
             st.session_state["w_hits"] = (max(hmin, lo), min(hmax, hi))
+
     if "w_price" not in st.session_state:
         r = parse_range(qp.get("price",""), float)
         if r:
             lo, hi = r
             st.session_state["w_price"] = (max(pmin, lo), min(pmax, hi))
 
-    # ordering / sort
     if "w_order_by" not in st.session_state and qp.get("order"):
         st.session_state["w_order_by"] = qp["order"]
     if "w_order_desc" not in st.session_state and "desc" in qp:
         st.session_state["w_order_desc"] = (str(qp["desc"]) == "1")
 
-    # pagination + page size
     if "page" not in st.session_state:
         try:
             st.session_state["page"] = max(0, int(qp.get("page","0")))
@@ -240,7 +228,7 @@ def hydrate_from_qp(brands_opts, categories_opts, pmin, pmax, hmin, hmax):
     LOG.log("Hydrated from query params", qp)
 
 
-# ============================ HTTP helper (defined BEFORE sidebar) ============================
+# ============================ HTTP helper ============================
 
 def http_get(url: str, params: dict, label: str = "") -> tuple[list, str | None]:
     t0 = time.perf_counter()
@@ -303,6 +291,10 @@ def load_options(limit_first_page: int = 2000):
     LOG.log("load_options: computed ranges", {"pmin": pmin, "pmax": pmax, "hmin": hmin, "hmax": hmax})
     return brands, cats, pmin, pmax, hmin, hmax
 
+
+def pg_in(values: list[str]) -> str:
+    esc = [v.replace('"', '""') for v in values]
+    return 'in.(' + ",".join([f'"{e}"' for e in esc]) + ')'
 
 def build_params(flt: dict, limit: int, offset: int) -> dict:
     p: dict[str, list | str] = {
@@ -378,19 +370,6 @@ def fetch_series(item_url: str, n: int = MAX_POINTS) -> pd.DataFrame:
     return df
 
 
-# ============================ Utilities ============================
-
-def pg_in(values: list[str]) -> str:
-    esc = [v.replace('"', '""') for v in values]
-    return 'in.(' + ",".join([f'"{e}"' for e in esc]) + ')'
-
-def pct_fmt(x) -> str:
-    try:
-        return f"{float(x)*100:.1f}%"
-    except Exception:
-        return "—"
-
-
 # ============================ Stateful widget helpers ============================
 
 def slider_stateful(key, label, min_value, max_value, value_default, **kwargs):
@@ -449,7 +428,6 @@ with st.sidebar:
     if st.button("Reset filters", key="btn_reset"):
         st.session_state["filters_applied"] = False
         st.session_state["page"] = 0
-        # clear widget-backed state
         for k in list(st.session_state.keys()):
             if k.startswith("w_"):
                 del st.session_state[k]
@@ -462,7 +440,6 @@ with st.sidebar:
 st.title("UAE Men Shoes — Current Global Lows")
 st.caption("Data live from Supabase REST API (materialized view + time series).")
 
-# Load options and hydrate widgets from URL (if present)
 brands, categories, pmin, pmax, hmin, hmax = load_options()
 hydrate_from_qp(brands, categories, pmin, pmax, hmin, hmax)
 
@@ -509,17 +486,15 @@ with st.form("filters_form"):
     submitted = st.form_submit_button("Apply Filters", use_container_width=True)
     if submitted:
         st.session_state["filters_applied"] = True
-        st.session_state["page"] = 0  # reset to first page
-        encode_filters_to_qp()        # persist in URL
+        st.session_state["page"] = 0
+        encode_filters_to_qp()
         LOG.log("Form submitted", {"submitted": True})
 
-# If filters weren't applied yet, don't render results
 if not st.session_state.get("filters_applied", False):
     st.info("↑ Set your filters, then click **Apply Filters**.")
     LOG.render()
     st.stop()
 
-# Build filter payload from current widget values (persisted by keys)
 flt = {
     "brands": st.session_state.get("w_brands", []),
     "category": None if st.session_state.get("w_category") in (None, "(Any)") else st.session_state.get("w_category"),
@@ -532,7 +507,6 @@ flt = {
     "order_desc": st.session_state.get("w_order_desc", True),
 }
 
-# Pagination state (+ write to URL when changed)
 page = st.session_state.get("page", 0)
 prev_col, _, next_col = st.columns([1, 6, 1])
 with prev_col:
@@ -550,7 +524,6 @@ page = st.session_state.get("page", 0)
 page_size = st.session_state.get("w_page_size", 24)
 LOG.log("Pagination", {"page": page, "page_size": page_size})
 
-# Data fetch
 df, total = fetch_items(flt, page, page_size)
 if df.empty:
     st.warning("No items match your filters.")
@@ -577,7 +550,6 @@ for r in range(rows):
                 left, right = st.columns([1, 2])
                 with left:
                     if row.get("image_link"):
-                        # Older Streamlit builds prefer use_column_width
                         st.image(row["image_link"], use_column_width=True)
                 with right:
                     st.markdown(f"**{row.get('brand','')}**")
@@ -596,7 +568,6 @@ for r in range(rows):
                     st.metric("90d Δ", pct_fmt(row.get("delta_vs_90d_pct")))
                     st.caption(f"2nd-lowest gap: {pct_fmt(row.get('gap_to_second_lowest_pct'))}")
 
-                # ---- Price history: last 200 timestamps per URL (cached) ----
                 with st.expander("📈 Price History (AED)", expanded=False):
                     ts = fetch_series(row["url"], n=MAX_POINTS)
                     if ts.empty:
@@ -618,5 +589,4 @@ for r in range(rows):
                         st.plotly_chart(fig, use_container_width=True)
                     LOG.log("Rendered series chart (lastN)", {"url_preview": row["url"][:60] + "…", "points": len(ts)})
 
-# Final: render logs
 LOG.render()
