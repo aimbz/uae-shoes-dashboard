@@ -1,13 +1,9 @@
 # streamlit_app.py
 # UAE Men Shoes — Global Lows (Supabase REST API + Streamlit)
 # Stable filters in URL + Plotly (last 200 points) + diagnostics
-# Fixes:
-# - Disable file watcher (avoids inotify limit crash on Streamlit Cloud)
-# - Single sidebar, unique keys (no DuplicateWidgetID)
-# - No default+session_state widget conflicts
-# - Filters/page persist and rehydrate from URL
+# Card tweaks: full-width image, 4 items/row, smaller metric fonts
 
-# --- Disable Streamlit file watcher BEFORE importing streamlit ---
+# --- Disable Streamlit file watcher BEFORE importing streamlit (fixes inotify crash) ---
 import os
 os.environ["STREAMLIT_SERVER_FILE_WATCHER_TYPE"] = "none"
 
@@ -95,6 +91,23 @@ def boot_diag():
 
 st.set_page_config(page_title="UAE Men Shoes — Global Lows", layout="wide")
 boot_diag()
+
+# Global CSS: slimmer metrics + tighter cards + responsive tweaks
+st.markdown("""
+<style>
+/* Metric value & label smaller */
+div[data-testid="stMetric"] div[data-testid="stMetricValue"] { font-size: 1.25rem; line-height: 1.2; }
+div[data-testid="stMetric"] div[data-testid="stMetricLabel"] { font-size: 0.8rem; color: #6b7280; }
+div[data-testid="stMetricDelta"] { font-size: 0.9rem; }
+
+/* Card spacing */
+.block-container { padding-top: 1rem; }
+.st-emotion-cache-16idsys p { margin-bottom: 0.25rem; } /* tighten st.markdown paragraphs */
+
+/* Make images nicely rounded in cards */
+img { border-radius: 12px; }
+</style>
+""", unsafe_allow_html=True)
 
 SUPABASE_URL = (st.secrets.get("SUPABASE_URL") or "").rstrip("/")
 SUPABASE_ANON_KEY = st.secrets.get("SUPABASE_ANON_KEY")
@@ -351,14 +364,10 @@ MAX_POINTS = 200  # last N timestamps per product URL
 
 @st.cache_data(ttl=300, max_entries=512)
 def fetch_series(item_url: str, n: int = MAX_POINTS) -> pd.DataFrame:
-    """
-    Fetch the most recent N points for a product URL (primary table first, then fallback),
-    then sort ascending for plotting. De-duplicates exact same timestamp rows.
-    """
     params = {
         "select": "timestamp,price",
         "url": f"eq.{item_url}",
-        "order": "timestamp.desc",  # newest first
+        "order": "timestamp.desc",
         "limit": str(n),
     }
 
@@ -516,6 +525,7 @@ flt = {
     "order_desc": st.session_state.get("w_order_desc", True),
 }
 
+# Pagination controls
 page = st.session_state.get("page", 0)
 prev_col, _, next_col = st.columns([1, 6, 1])
 with prev_col:
@@ -533,6 +543,7 @@ page = st.session_state.get("page", 0)
 page_size = st.session_state.get("w_page_size", 24)
 LOG.log("Pagination", {"page": page, "page_size": page_size})
 
+# Data fetch
 df, total = fetch_items(flt, page, page_size)
 if df.empty:
     st.warning("No items match your filters.")
@@ -542,10 +553,11 @@ if df.empty:
 
 st.caption(f"Matches: {total if total is not None else '—'}  •  Page {page + 1}")
 
-# Cards grid
-ncols = 3
+# ============================ Cards grid (4 per row) ============================
+
+ncols = 4  # <-- 4 items per row (Streamlit will stack on small screens)
 rows = math.ceil(len(df) / ncols)
-LOG.log("Rendering grid", {"rows": rows, "n_items": len(df)})
+LOG.log("Rendering grid", {"rows": rows, "n_items": len(df), "ncols": ncols})
 
 for r in range(rows):
     cols = st.columns(ncols, gap="large")
@@ -556,16 +568,15 @@ for r in range(rows):
         row = df.iloc[i]
         with cols[c]:
             with st.container(border=True):
-                left, right = st.columns([1, 2])
-                with left:
-                    if row.get("image_link"):
-                        st.image(row["image_link"], use_column_width=True)
-                with right:
-                    st.markdown(f"**{row.get('brand','')}**")
-                    st.markdown(row.get("title", ""))
-                    if row.get("url"):
-                        st.link_button("Open product", row["url"], use_container_width=True)
+                # Full-width image on top (button removed as requested)
+                if row.get("image_link"):
+                    st.image(row["image_link"], use_column_width=True)
 
+                # Brand & title
+                st.markdown(f"**{row.get('brand','')}**")
+                st.markdown(row.get("title", ""))
+
+                # 3 small metrics in a row
                 m1, m2, m3 = st.columns(3)
                 with m1:
                     st.metric("Latest (AED)", f"{row.get('latest_price', 0):.2f}")
@@ -577,6 +588,7 @@ for r in range(rows):
                     st.metric("90d Δ", pct_fmt(row.get("delta_vs_90d_pct")))
                     st.caption(f"2nd-lowest gap: {pct_fmt(row.get('gap_to_second_lowest_pct'))}")
 
+                # Price history
                 with st.expander("📈 Price History (AED)", expanded=False):
                     ts = fetch_series(row["url"], n=MAX_POINTS)
                     if ts.empty:
@@ -593,9 +605,10 @@ for r in range(rows):
                             xaxis_title="Date (Asia/Beirut)",
                             yaxis_title="AED",
                             margin=dict(l=10, r=10, t=30, b=10),
-                            height=300,
+                            height=280,
                         )
                         st.plotly_chart(fig, use_container_width=True)
-                    LOG.log("Rendered series chart (lastN)", {"url_preview": row["url"][:60] + "…", "points": len(ts)})
+                    LOG.log("Rendered series chart (lastN)", {"url_preview": str(row.get('url',''))[:60] + "…", "points": len(ts)})
 
+# Final: render logs
 LOG.render()
