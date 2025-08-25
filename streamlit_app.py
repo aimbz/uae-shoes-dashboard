@@ -354,8 +354,8 @@ def _scan_distinct_values_from_mv(col: str, page_size: int = 1000) -> list[str]:
 @st.cache_data(ttl=300)
 def load_options():
     # Read ALL brands/categories from the MATERIALIZED VIEW (not the prices table)
-    brands = _scan_distinct_values_from_mv("brand", page_size=2000)
-    categories = _scan_distinct_values_from_mv("category", page_size=2000)
+    brands = _scan_distinct_values_from_mv("brand", page_size=1000)
+    categories = _scan_distinct_values_from_mv("category", page_size=1000)
 
     # Slider ranges via single-row min/max queries (cheap)
     def minmax(col, cast=float):
@@ -707,6 +707,7 @@ for r in range(rows):
 
 # Final: logs
 LOG.render()
+
 
 
 
