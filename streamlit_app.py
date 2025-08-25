@@ -402,7 +402,7 @@ for r in range(rows):
                 left, right = st.columns([1, 2])
                 with left:
                     if row.get("image_link"):
-                        st.image(row["image_link"], use_container_width=True)
+                        st.image(row["image_link"], use_column_width=True)
                 with right:
                     st.markdown(f"**{row.get('brand','')}**")
                     st.markdown(row.get("title", ""))
@@ -442,4 +442,5 @@ for r in range(rows):
 
 # Final: render logs
 LOG.render()
+
 
