@@ -1,22 +1,111 @@
 # streamlit_app.py
 # UAE Men Shoes — Global Lows (Supabase REST API + Streamlit)
+# Diagnostics-heavy version: prints detailed boot + network logs under "Logs".
 # Requires: streamlit, pandas, requests, altair  (see requirements.txt)
 
 import math
-import requests
-import pandas as pd
-import streamlit as st
+import os
+import sys
+import time
+import json
+import platform
+from datetime import datetime, timezone
 from urllib.parse import quote
 
-# ---------------------------- App config ----------------------------
-st.set_page_config(page_title="UAE Men Shoes — Global Lows", layout="wide")
+import pandas as pd
+import requests
+import streamlit as st
 
-# Read secrets safely (prevents crash if not set)
+
+# ============================ Diagnostics logger ============================
+
+class DiagLog:
+    def __init__(self, name="logs"):
+        self.name = name
+        # Keep across reruns
+        if "_diag_log" not in st.session_state:
+            st.session_state["_diag_log"] = []
+        self.buf = st.session_state["_diag_log"]
+
+    def log(self, msg, data=None):
+        ts = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M:%S.%f %Z")
+        entry = {"ts": ts, "msg": str(msg)}
+        if data is not None:
+            try:
+                # ensure JSON-serializable for pretty view
+                json.dumps(data)
+                entry["data"] = data
+            except Exception:
+                entry["data"] = str(data)
+        self.buf.append(entry)
+
+    def clear(self):
+        st.session_state["_diag_log"] = []
+        self.buf = st.session_state["_diag_log"]
+
+    def render(self):
+        with st.expander("🧰 Logs (diagnostics)", expanded=True):
+            st.caption("Detailed boot/runtime logs (safe: no secrets)")
+            if not self.buf:
+                st.write("No logs yet.")
+                return
+            for e in self.buf[-200:]:  # cap rendering
+                st.write(f"[{e['ts']}] {e['msg']}")
+                if "data" in e:
+                    with st.expander("details", expanded=False):
+                        st.code(json.dumps(e["data"], indent=2))
+
+
+LOG = DiagLog()
+
+
+def safe_pkg_version(mod_name):
+    try:
+        mod = __import__(mod_name)
+        return getattr(mod, "__version__", "unknown")
+    except Exception:
+        return "missing"
+
+
+def boot_diag():
+    LOG.clear()
+    LOG.log("Boot: starting app")
+    LOG.log(
+        "Environment",
+        {
+            "python": sys.version,
+            "platform": platform.platform(),
+            "executable": sys.executable,
+            "cwd": os.getcwd(),
+            "timezone": time.tzname,
+            "streamlit": safe_pkg_version("streamlit"),
+            "pandas": safe_pkg_version("pandas"),
+            "requests": safe_pkg_version("requests"),
+        },
+    )
+
+
+# ============================ App config / Secrets ============================
+
+st.set_page_config(page_title="UAE Men Shoes — Global Lows", layout="wide")
+boot_diag()
+
 SUPABASE_URL = (st.secrets.get("SUPABASE_URL") or "").rstrip("/")
 SUPABASE_ANON_KEY = st.secrets.get("SUPABASE_ANON_KEY")
 
+LOG.log(
+    "Secrets presence check",
+    {
+        "SUPABASE_URL_set": bool(SUPABASE_URL),
+        "SUPABASE_ANON_KEY_set": bool(SUPABASE_ANON_KEY),
+        "url_preview": SUPABASE_URL[:40] + ("…" if len(SUPABASE_URL) > 40 else ""),
+    },
+)
+
 if not SUPABASE_URL or not SUPABASE_ANON_KEY:
     st.error("Missing Supabase secrets. Go to Settings → Secrets and set SUPABASE_URL + SUPABASE_ANON_KEY.")
+    LOG.log("Fatal: missing secrets -> stopping")
+    LOG.render()
     st.stop()
 
 REST = f"{SUPABASE_URL}/rest/v1"
@@ -26,14 +115,69 @@ PRICES = 'nam-uae-men-shoes-prices'            # raw time-series table
 HDR = {
     "apikey": SUPABASE_ANON_KEY,
     "Authorization": f"Bearer {SUPABASE_ANON_KEY}",
-    "Prefer": "count=exact",   # so Content-Range header includes total rows
+    "Prefer": "count=exact",
 }
 
-# ---------------------------- Helpers ----------------------------
+# User toggles for diagnostics
+with st.sidebar:
+    st.markdown("### Diagnostics")
+    VERBOSE_NET = st.toggle("Verbose network logs", value=True, help="Log each HTTP request/response meta")
+    TEST_PING = st.button("Run connectivity test")
+
+
+# ============================ HTTP helper ============================
+
+def http_get(url: str, params: dict, label: str = "") -> tuple[list, str | None]:
+    """GET with detailed timing + error surfacing."""
+    t0 = time.perf_counter()
+    if VERBOSE_NET:
+        LOG.log("HTTP GET start", {"label": label, "url": url, "params": params})
+    try:
+        r = requests.get(url, params=params, headers=HDR, timeout=60)
+        dur = time.perf_counter() - t0
+        meta = {
+            "label": label,
+            "status_code": r.status_code,
+            "elapsed_s": round(dur, 3),
+            "ok": r.ok,
+            "url": r.url,
+            "content_length": len(r.content or b""),
+            "content_range": r.headers.get("content-range"),
+            "ratelimit-remaining": r.headers.get("x-ratelimit-remaining"),
+        }
+        if VERBOSE_NET:
+            LOG.log("HTTP GET end", meta)
+
+        if not r.ok:
+            # Surface body but avoid giant dumps
+            body_preview = r.text[:1000]
+            LOG.log("HTTP error body (preview)", {"body": body_preview})
+            st.error(f"Supabase REST error: {r.status_code}\n{body_preview}")
+            st.stop()
+
+        # Try JSON parse with guard
+        try:
+            js = r.json()
+        except Exception as e:
+            LOG.log("JSON decode error", {"error": str(e), "body_preview": r.text[:1000]})
+            st.error("Failed to decode JSON from REST response.")
+            st.stop()
+
+        return js, r.headers.get("content-range")
+
+    except requests.RequestException as e:
+        dur = time.perf_counter() - t0
+        LOG.log("Network exception", {"label": label, "error": str(e), "elapsed_s": round(dur, 3)})
+        st.error(f"Network error: {e}")
+        st.stop()
+
+
+# ============================ Small utilities ============================
+
 def pg_in(values: list[str]) -> str:
-    """PostgREST IN() filter string with proper double-quote escaping."""
     esc = [v.replace('"', '""') for v in values]
     return 'in.(' + ",".join([f'"{e}"' for e in esc]) + ')'
+
 
 def pct_fmt(x) -> str:
     try:
@@ -41,35 +185,35 @@ def pct_fmt(x) -> str:
     except Exception:
         return "—"
 
-def http_get(url: str, params: dict) -> tuple[list, str | None]:
-    """GET with simple error surface in Streamlit UI."""
-    try:
-        r = requests.get(url, params=params, headers=HDR, timeout=60)
-        if not r.ok:
-            st.error(f"Supabase REST error: {r.status_code}\n{r.text}")
-            st.stop()
-        return r.json(), r.headers.get("content-range")
-    except requests.RequestException as e:
-        st.error(f"Network error: {e}")
-        st.stop()
+
+# ============================ Option loaders (cached) ============================
 
 @st.cache_data(ttl=300)
-def load_options():
-    """Fetch a big page and compute brands/categories/min-max locally (simple & robust)."""
-    data, _ = http_get(f"{REST}/{MV}", {"select": "brand,category,latest_price,min_hits", "limit": "10000"})
+def load_options(limit_first_page: int = 2000):
+    label = "load_options"
+    LOG.log("load_options: fetching", {"limit": limit_first_page})
+    data, _ = http_get(
+        f"{REST}/{MV}",
+        {"select": "brand,category,latest_price,min_hits", "limit": str(limit_first_page)},
+        label=label,
+    )
     df = pd.DataFrame(data)
+    LOG.log("load_options: fetched rows", {"rows": len(df)})
+
     brands = sorted([b for b in df.get("brand", pd.Series(dtype=str)).dropna().unique().tolist() if b])
     cats = sorted([c for c in df.get("category", pd.Series(dtype=str)).dropna().unique().tolist() if c]) or ["Men UAE shoes"]
 
     if df.empty:
+        LOG.log("load_options: empty dataframe")
         return brands, cats, 0.0, 0.0, 0, 0
 
     pmin, pmax = float(df["latest_price"].min()), float(df["latest_price"].max())
     hmin, hmax = int(df["min_hits"].min()), int(df["min_hits"].max())
+    LOG.log("load_options: computed ranges", {"pmin": pmin, "pmax": pmax, "hmin": hmin, "hmax": hmax})
     return brands, cats, pmin, pmax, hmin, hmax
 
+
 def build_params(flt: dict, limit: int, offset: int) -> dict:
-    """Translate UI filters → PostgREST query parameters."""
     p: dict[str, list | str] = {
         "select": "*",
         "has_higher": "eq.true",
@@ -79,19 +223,16 @@ def build_params(flt: dict, limit: int, offset: int) -> dict:
         "count": "exact",
     }
     if flt["brands"]:
-        p["brand"] = pg_in(flt["brands"])                # brand=in.("Nike","Adidas")
-
+        p["brand"] = pg_in(flt["brands"])
     if flt["category"]:
         p["category"] = f"eq.{flt['category']}"
 
-    # numeric ranges
     lo, hi = flt["min_hits"]
     p["min_hits"] = [f"gte.{lo}", f"lte.{hi}"]
 
     plo, phi = flt["price_range"]
     p["latest_price"] = [f"gte.{plo}", f"lte.{phi}"]
 
-    # percent sliders (UI is %, DB is fraction)
     for col, (lo_pct, hi_pct) in {
         "drop_pct_vs_prev": flt["drop_prev"],
         "delta_vs_30d_pct": flt["drop_30"],
@@ -99,14 +240,29 @@ def build_params(flt: dict, limit: int, offset: int) -> dict:
     }.items():
         p[col] = [f"gte.{lo_pct/100.0}", f"lte.{hi_pct/100.0}"]
 
+    LOG.log("build_params", {"limit": limit, "offset": offset, "order": p["order"]})
     return p
+
 
 @st.cache_data(ttl=300)
 def fetch_items(flt: dict, page: int, page_size: int) -> tuple[pd.DataFrame, int | None]:
     params = build_params(flt, page_size, page * page_size)
-    data, cr = http_get(f"{REST}/{MV}", params)
+    t0 = time.perf_counter()
+    data, cr = http_get(f"{REST}/{MV}", params, label="fetch_items")
     total = int(cr.split("/")[-1]) if cr and "/" in cr else None
-    return pd.DataFrame(data), total
+    df = pd.DataFrame(data)
+    LOG.log(
+        "fetch_items result",
+        {
+            "rows": len(df),
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+            "elapsed_s": round(time.perf_counter() - t0, 3),
+        },
+    )
+    return df, total
+
 
 @st.cache_data(ttl=300)
 def fetch_series(item_url: str, limit: int = 5000) -> pd.DataFrame:
@@ -116,13 +272,30 @@ def fetch_series(item_url: str, limit: int = 5000) -> pd.DataFrame:
         "order": "timestamp.asc",
         "limit": str(limit),
     }
-    data, _ = http_get(f"{REST}/{PRICES}", params)
+    t0 = time.perf_counter()
+    data, _ = http_get(f"{REST}/{PRICES}", params, label="fetch_series")
     df = pd.DataFrame(data)
     if not df.empty:
         df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True).dt.tz_convert("Asia/Beirut")
+    LOG.log("fetch_series result", {"url_preview": item_url[:60] + "…", "rows": len(df), "elapsed_s": round(time.perf_counter() - t0, 3)})
     return df
 
-# ---------------------------- UI: Filters first ----------------------------
+
+# ============================ Optional connectivity test ============================
+
+if TEST_PING:
+    try:
+        LOG.log("Ping: MV limit=1")
+        sample, cr = http_get(f"{REST}/{MV}", {"select": "brand,latest_price", "limit": "1"}, label="ping_mv")
+        LOG.log("Ping MV ok", {"content_range": cr, "sample_rows": len(sample)})
+        st.success("Connectivity OK (MV). See logs below.")
+    except Exception as e:
+        LOG.log("Ping MV failed", {"error": str(e)})
+        st.error(f"Ping failed: {e}")
+
+
+# ============================ UI ============================
+
 st.title("UAE Men Shoes — Current Global Lows")
 st.caption("Data live from Supabase REST API (materialized view + time series).")
 
@@ -170,9 +343,11 @@ with st.form("filters_form"):
         page_size = st.select_slider("Page size", options=[12, 24, 48, 96], value=24)
 
     submitted = st.form_submit_button("Apply Filters")
+    LOG.log("Form submitted", {"submitted": submitted})
 
 if not submitted:
     st.info("↑ Set your filters, then click **Apply Filters**.")
+    LOG.render()
     st.stop()
 
 flt = {
@@ -187,7 +362,7 @@ flt = {
     "order_desc": order_desc,
 }
 
-# ---------------------------- Pagination ----------------------------
+# Pagination state
 page = st.session_state.get("page", 0)
 prev_col, _, next_col = st.columns([1, 6, 1])
 with prev_col:
@@ -197,17 +372,22 @@ with next_col:
     if st.button("Next ⟶"):
         page = page + 1
 st.session_state["page"] = page
+LOG.log("Pagination", {"page": page})
 
-# ---------------------------- Data & Grid ----------------------------
+# Data fetch
 df, total = fetch_items(flt, page, page_size)
 if df.empty:
     st.warning("No items match your filters.")
+    LOG.log("No matches, stopping")
+    LOG.render()
     st.stop()
 
 st.caption(f"Matches: {total if total is not None else '—'}  •  Page {page + 1}")
 
+# Cards grid
 ncols = 3
 rows = math.ceil(len(df) / ncols)
+LOG.log("Rendering grid", {"rows": rows, "n_items": len(df)})
 
 for r in range(rows):
     cols = st.columns(ncols, gap="large")
@@ -218,7 +398,6 @@ for r in range(rows):
         row = df.iloc[i]
         with cols[c]:
             with st.container(border=True):
-                # Header with image + metadata
                 left, right = st.columns([1, 2])
                 with left:
                     if row.get("image_link"):
@@ -229,7 +408,6 @@ for r in range(rows):
                     if row.get("url"):
                         st.link_button("Open product", row["url"], use_container_width=True)
 
-                # Key metrics
                 m1, m2, m3 = st.columns(3)
                 with m1:
                     st.metric("Latest (AED)", f"{row.get('latest_price', 0):.2f}")
@@ -241,8 +419,8 @@ for r in range(rows):
                     st.metric("90d Δ", pct_fmt(row.get("delta_vs_90d_pct")))
                     st.caption(f"2nd-lowest gap: {pct_fmt(row.get('gap_to_second_lowest_pct'))}")
 
-                # Chart (lazy-loaded in expander)
                 with st.expander("Price history (AED)"):
+                    ts0 = time.perf_counter()
                     ts = fetch_series(row["url"])
                     if ts.empty:
                         st.info("No time-series data.")
@@ -259,3 +437,7 @@ for r in range(rows):
                             .properties(height=220)
                         )
                         st.altair_chart(chart, use_container_width=True)
+                    LOG.log("Rendered series chart", {"url_preview": row["url"][:60] + "…", "elapsed_s": round(time.perf_counter() - ts0, 3)})
+
+# Final: render logs
+LOG.render()
