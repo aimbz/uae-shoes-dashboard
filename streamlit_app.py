@@ -1,7 +1,13 @@
+
 # streamlit_app.py
 # UAE Men Shoes — Global Lows (Supabase REST API + Streamlit)
-# Robust filters (persisted in URL), Plotly charts (last 200 points), diagnostics
-# Fix: No "default+session_state" widget conflicts (stateful widget helpers)
+# Robust filters persisted in URL + Plotly charts (last 200 points) + diagnostics
+# Fixes:
+# - No resets when opening/closing expanders (session_state flag)
+# - Survives reconnects (rehydrates from URL)
+# - No duplicate widget IDs
+# - No default+session_state widget conflicts
+# Requirements: streamlit, pandas, requests, plotly
 
 import math
 import os
@@ -118,6 +124,10 @@ HDR = {
     "Prefer": "count=exact",
 }
 
+# Verbose flag default (overridden by sidebar toggle later)
+VERBOSE_NET = True
+
+
 # ============================ Persistent state & query param helpers ============================
 
 if "filters_applied" not in st.session_state:
@@ -228,15 +238,26 @@ def hydrate_from_qp(brands_opts, categories_opts, pmin, pmax, hmin, hmax):
     LOG.log("Hydrated from query params", qp)
 
 
-# ============================ Sidebar ============================
+# ============================ Sidebar (single block; unique keys) ============================
 
 with st.sidebar:
     st.markdown("### Diagnostics")
-    VERBOSE_NET = st.toggle("Verbose network logs", value=True, help="Log each HTTP request/response meta")
-    TEST_PING = st.button("Run connectivity test")
+    VERBOSE_NET = st.toggle(
+        "Verbose network logs",
+        value=True,
+        help="Log each HTTP request/response meta",
+        key="t_verbose",
+    )
+
+    if st.button("Run connectivity test", key="btn_ping"):
+        try:
+            LOG.log("Ping: MV limit=1")
+            sample, cr = http_get := None, None  # placeholder to avoid linter warning
+        except Exception:
+            pass  # will be replaced below
 
     st.markdown("---")
-    if st.button("Reset filters"):
+    if st.button("Reset filters", key="btn_reset"):
         st.session_state["filters_applied"] = False
         st.session_state["page"] = 0
         # clear widget-backed state
@@ -251,7 +272,7 @@ with st.sidebar:
 
 def http_get(url: str, params: dict, label: str = "") -> tuple[list, str | None]:
     t0 = time.perf_counter()
-    if VERBOSE_NET:
+    if st.session_state.get("t_verbose", True):
         LOG.log("HTTP GET start", {"label": label, "url": url, "params": params})
     try:
         r = requests.get(url, params=params, headers=HDR, timeout=60)
@@ -265,7 +286,7 @@ def http_get(url: str, params: dict, label: str = "") -> tuple[list, str | None]
             "content_range": r.headers.get("content-range"),
             "ratelimit-remaining": r.headers.get("x-ratelimit-remaining"),
         }
-        if VERBOSE_NET:
+        if st.session_state.get("t_verbose", True):
             LOG.log("HTTP GET end", meta)
         if not r.ok:
             body_preview = r.text[:1000]
@@ -283,6 +304,19 @@ def http_get(url: str, params: dict, label: str = "") -> tuple[list, str | None]
         LOG.log("Network exception", {"label": label, "error": str(e)})
         st.error(f"Network error: {e}")
         st.stop()
+
+
+# After defining http_get, wire up the sidebar ping button properly
+with st.sidebar:
+    if st.session_state.get("btn_ping", False):
+        try:
+            LOG.log("Ping: MV limit=1")
+            sample, cr = http_get(f"{REST}/{MV}", {"select": "brand,latest_price", "limit": "1"}, label="ping_mv")
+            LOG.log("Ping MV ok", {"content_range": cr, "sample_rows": len(sample)})
+            st.success("Connectivity OK (MV). See logs below.")
+        except Exception as e:
+            LOG.log("Ping MV failed", {"error": str(e)})
+            st.error(f"Ping failed: {e}")
 
 
 # ============================ Utilities ============================
@@ -431,21 +465,6 @@ def select_slider_stateful(key, label, options, value_default=None, **kwargs):
         return st.select_slider(label, options=options, value=value_default, key=key, **kwargs)
 
 
-# ============================ Optional connectivity test ============================
-
-with st.sidebar:
-    st.markdown("### Quick checks")
-    if st.button("Run connectivity test"):
-        try:
-            LOG.log("Ping: MV limit=1")
-            sample, cr = http_get(f"{REST}/{MV}", {"select": "brand,latest_price", "limit": "1"}, label="ping_mv")
-            LOG.log("Ping MV ok", {"content_range": cr, "sample_rows": len(sample)})
-            st.success("Connectivity OK (MV). See logs below.")
-        except Exception as e:
-            LOG.log("Ping MV failed", {"error": str(e)})
-            st.error(f"Ping failed: {e}")
-
-
 # ============================ UI ============================
 
 st.title("UAE Men Shoes — Current Global Lows")
@@ -525,12 +544,12 @@ flt = {
 page = st.session_state.get("page", 0)
 prev_col, _, next_col = st.columns([1, 6, 1])
 with prev_col:
-    if st.button("⟵ Prev", disabled=(page <= 0)):
+    if st.button("⟵ Prev", disabled=(page <= 0), key="btn_prev"):
         st.session_state["page"] = max(0, page - 1)
         encode_filters_to_qp()
         st.rerun()
 with next_col:
-    if st.button("Next ⟶"):
+    if st.button("Next ⟶", key="btn_next"):
         st.session_state["page"] = page + 1
         encode_filters_to_qp()
         st.rerun()
