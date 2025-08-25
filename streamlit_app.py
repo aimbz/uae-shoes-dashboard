@@ -325,7 +325,7 @@ def http_get(url: str, params: dict, label: str = "") -> tuple[list, str | None]
 # ============================ Data loaders (cached) ============================
 
 @st.cache_data(ttl=300)
-def load_options(limit_first_page: int = 2000):
+def load_options(limit_first_page: int = 10000):
     LOG.log("load_options: fetching", {"limit": limit_first_page})
     data, _ = http_get(
         f"{REST}/{MV}",
@@ -669,3 +669,4 @@ for r in range(rows):
 
 # Final: logs
 LOG.render()
+
