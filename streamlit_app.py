@@ -1,15 +1,15 @@
 # streamlit_app.py
 # UAE Men Shoes — Global Lows (Supabase REST API + Streamlit)
-# Stable filters persisted in URL + Plotly charts (last 200 points) + diagnostics
-# Key fixes:
-# - Disable file watcher to avoid "inotify instance limit reached"
-# - Single sidebar (no duplicate widget IDs)
+# Stable filters in URL + Plotly (last 200 points) + diagnostics
+# Fixes:
+# - Disable file watcher (avoids inotify limit crash on Streamlit Cloud)
+# - Single sidebar, unique keys (no DuplicateWidgetID)
 # - No default+session_state widget conflicts
-# - Filters/page survive reruns + reconnects; URL stays in sync
+# - Filters/page persist and rehydrate from URL
 
-# --- Disable Streamlit file watcher (must be BEFORE importing streamlit) ---
+# --- Disable Streamlit file watcher BEFORE importing streamlit ---
 import os
-os.environ["STREAMLIT_SERVER_FILE_WATCHER_TYPE"] = "none"  # avoids inotify limit
+os.environ["STREAMLIT_SERVER_FILE_WATCHER_TYPE"] = "none"
 
 import math
 import sys
@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 import pandas as pd
 import requests
 import plotly.graph_objs as go
-import streamlit as st  # import AFTER setting env var above
+import streamlit as st
 
 
 # ============================ Diagnostics logger ============================
@@ -292,9 +292,18 @@ def load_options(limit_first_page: int = 2000):
     return brands, cats, pmin, pmax, hmin, hmax
 
 
+# ============================ Utilities ============================
+
 def pg_in(values: list[str]) -> str:
     esc = [v.replace('"', '""') for v in values]
     return 'in.(' + ",".join([f'"{e}"' for e in esc]) + ')'
+
+def pct_fmt(x) -> str:
+    try:
+        return f"{float(x)*100:.1f}%"
+    except Exception:
+        return "—"
+
 
 def build_params(flt: dict, limit: int, offset: int) -> dict:
     p: dict[str, list | str] = {
