@@ -1,6 +1,6 @@
 # streamlit_app.py
 # UAE Men Shoes — Global Lows (Supabase REST API + Streamlit)
-# Plotly charts + lazy-loaded price history + diagnostics logs
+# Plotly charts + per-card charts (no lazy load) + diagnostics logs
 
 import math
 import os
@@ -108,8 +108,8 @@ if not SUPABASE_URL or not SUPABASE_ANON_KEY:
 
 REST = f"{SUPABASE_URL}/rest/v1"
 MV = "nam_uae_men_shoes_at_global_low"          # materialized view
-PRICES_PRIMARY = 'nam-uae-men-shoes-prices'     # likely on your cloud DB
-PRICES_FALLBACK = 'prices'                      # used in your local app
+PRICES_PRIMARY = 'nam-uae-men-shoes-prices'     # cloud table
+PRICES_FALLBACK = 'prices'                      # local/dev table
 
 HDR = {
     "apikey": SUPABASE_ANON_KEY,
@@ -117,7 +117,6 @@ HDR = {
     "Prefer": "count=exact",
 }
 
-# Sidebar diagnostics toggles
 with st.sidebar:
     st.markdown("### Diagnostics")
     VERBOSE_NET = st.toggle("Verbose network logs", value=True, help="Log each HTTP request/response meta")
@@ -127,7 +126,6 @@ with st.sidebar:
 # ============================ HTTP helper ============================
 
 def http_get(url: str, params: dict, label: str = "") -> tuple[list, str | None]:
-    """GET with detailed timing + error surfacing."""
     t0 = time.perf_counter()
     if VERBOSE_NET:
         LOG.log("HTTP GET start", {"label": label, "url": url, "params": params})
@@ -145,22 +143,18 @@ def http_get(url: str, params: dict, label: str = "") -> tuple[list, str | None]
         }
         if VERBOSE_NET:
             LOG.log("HTTP GET end", meta)
-
         if not r.ok:
             body_preview = r.text[:1000]
             LOG.log("HTTP error body (preview)", {"body": body_preview})
             st.error(f"Supabase REST error: {r.status_code}\n{body_preview}")
             st.stop()
-
         try:
             js = r.json()
         except Exception as e:
             LOG.log("JSON decode error", {"error": str(e), "body_preview": r.text[:1000]})
             st.error("Failed to decode JSON from REST response.")
             st.stop()
-
         return js, r.headers.get("content-range")
-
     except requests.RequestException as e:
         LOG.log("Network exception", {"label": label, "error": str(e)})
         st.error(f"Network error: {e}")
@@ -213,26 +207,21 @@ def build_params(flt: dict, limit: int, offset: int) -> dict:
         "order": f"{flt['order_by']}.{ 'desc' if flt['order_desc'] else 'asc'}",
         "limit": str(limit),
         "offset": str(offset),
-        # Prefer: count=exact is already in headers
     }
     if flt["brands"]:
         p["brand"] = pg_in(flt["brands"])
     if flt["category"]:
         p["category"] = f"eq.{flt['category']}"
-
     lo, hi = flt["min_hits"]
     p["min_hits"] = [f"gte.{lo}", f"lte.{hi}"]
-
     plo, phi = flt["price_range"]
     p["latest_price"] = [f"gte.{plo}", f"lte.{phi}"]
-
     for col, (lo_pct, hi_pct) in {
         "drop_pct_vs_prev": flt["drop_prev"],
         "delta_vs_30d_pct": flt["drop_30"],
         "delta_vs_90d_pct": flt["drop_90"],
     }.items():
         p[col] = [f"gte.{lo_pct/100.0}", f"lte.{hi_pct/100.0}"]
-
     LOG.log("build_params", {"limit": limit, "offset": offset, "order": p["order"]})
     return p
 
@@ -421,35 +410,27 @@ for r in range(rows):
                     st.metric("90d Δ", pct_fmt(row.get("delta_vs_90d_pct")))
                     st.caption(f"2nd-lowest gap: {pct_fmt(row.get('gap_to_second_lowest_pct'))}")
 
-                # ---- Lazy-loaded Plotly price history (no DB hit until opted in) ----
+                # ---- Price history: load for every card (cached) ----
                 with st.expander("📈 Price History (AED)", expanded=False):
-                    chk_key = f"show_hist_{i}"
-                    show = st.checkbox("Show price history", key=chk_key)
-                    if show:
-                        with st.spinner("Fetching history…"):
-                            ts = fetch_series(row["url"])
-                        if ts.empty:
-                            st.info("No time-series data.")
-                        else:
-                            fig = go.Figure()
-                            fig.add_trace(go.Scatter(
-                                x=ts["timestamp"],
-                                y=ts["price"],
-                                mode="lines+markers",
-                                name="Price",
-                            ))
-                            fig.update_layout(
-                                title="Price Over Time",
-                                xaxis_title="Date (Asia/Beirut)",
-                                yaxis_title="AED",
-                                margin=dict(l=10, r=10, t=30, b=10),
-                                height=300,
-                            )
-                            st.plotly_chart(fig, use_container_width=True)
-                        LOG.log("Rendered series chart (lazy, plotly)", {
-                            "url_preview": row["url"][:60] + "…",
-                            "checked": True
-                        })
+                    ts = fetch_series(row["url"])
+                    if ts.empty:
+                        st.info("No time-series data.")
+                    else:
+                        fig = go.Figure()
+                        fig.add_trace(go.Scatter(
+                            x=ts["timestamp"],
+                            y=ts["price"],
+                            mode="lines+markers",
+                            name="Price",
+                        ))
+                        fig.update_layout(
+                            xaxis_title="Date (Asia/Beirut)",
+                            yaxis_title="AED",
+                            margin=dict(l=10, r=10, t=30, b=10),
+                            height=300,
+                        )
+                        st.plotly_chart(fig, use_container_width=True)
+                    LOG.log("Rendered series chart", {"url_preview": row["url"][:60] + "…"})
 
 # Final: render logs
 LOG.render()
