@@ -1,7 +1,7 @@
 # streamlit_app.py
 # UAE Men Shoes — Global Lows (Supabase REST API + Streamlit)
-# Plotly charts + last 200 points per URL + diagnostics
-# Robust to reruns/reconnects: filters & page persist via query params (no double-encode)
+# Robust filters (persisted in URL), Plotly charts (last 200 points), diagnostics
+# Fix: No "default+session_state" widget conflicts (stateful widget helpers)
 
 import math
 import os
@@ -128,15 +128,13 @@ if "page" not in st.session_state:
 def qp_get() -> dict:
     """Return query params as a simple dict[str,str]. Works across Streamlit versions."""
     try:
-        # Newer Streamlit
         return {k: v for k, v in st.query_params.items()}
     except Exception:
-        # Older API returns dict[str,list[str]]
         raw = st.experimental_get_query_params()
         return {k: (v[0] if isinstance(v, list) and v else "") for k, v in raw.items()}
 
 def qp_set(new_params: dict):
-    """Set/replace query params from scalars; let Streamlit handle encoding (no manual quoting)."""
+    """Set/replace query params from scalars; let Streamlit handle encoding."""
     qp = {k: (",".join(v) if isinstance(v, list) else str(v)) for k, v in new_params.items() if v is not None}
     try:
         st.query_params.update(qp)
@@ -150,14 +148,10 @@ def qp_clear():
         st.experimental_set_query_params()
 
 def encode_filters_to_qp():
-    """Mirror current widget state into the URL (without double-encoding, and ignoring '(Any)')."""
+    """Mirror current widget state into the URL (ignore '(Any)')."""
     brands = st.session_state.get("w_brands", [])
     category = st.session_state.get("w_category")
-    if not category or category == "(Any)":
-        category_param = ""
-    else:
-        category_param = category
-
+    category_param = "" if (not category or category == "(Any)") else category
     hits = st.session_state.get("w_hits")
     price = st.session_state.get("w_price")
     order = st.session_state.get("w_order_by") or ""
@@ -185,44 +179,50 @@ def parse_range(s: str, cast=float):
         return None
 
 def hydrate_from_qp(brands_opts, categories_opts, pmin, pmax, hmin, hmax):
+    """Populate session_state from URL ONLY if keys are not already set."""
     qp = qp_get()
     if not qp or (qp.get("applied") != "1" and not any(qp.get(k) for k in ("brands","category","order","price","hits"))):
-        return  # nothing to hydrate
+        return
 
     # brands
-    if qp.get("brands"):
+    if "w_brands" not in st.session_state and qp.get("brands"):
         picked = [b for b in qp["brands"].split(",") if b]
         st.session_state["w_brands"] = [b for b in picked if b in brands_opts]
 
     # category
-    cat = qp.get("category", "")
-    st.session_state["w_category"] = cat if cat in categories_opts else "(Any)"
+    if "w_category" not in st.session_state:
+        cat = qp.get("category", "")
+        st.session_state["w_category"] = cat if cat in categories_opts else "(Any)"
 
     # ranges
-    r = parse_range(qp.get("hits",""), int)
-    if r:
-        lo, hi = r
-        st.session_state["w_hits"] = (max(hmin, lo), min(hmax, hi))
-    r = parse_range(qp.get("price",""), float)
-    if r:
-        lo, hi = r
-        st.session_state["w_price"] = (max(pmin, lo), min(pmax, hi))
+    if "w_hits" not in st.session_state:
+        r = parse_range(qp.get("hits",""), int)
+        if r:
+            lo, hi = r
+            st.session_state["w_hits"] = (max(hmin, lo), min(hmax, hi))
+    if "w_price" not in st.session_state:
+        r = parse_range(qp.get("price",""), float)
+        if r:
+            lo, hi = r
+            st.session_state["w_price"] = (max(pmin, lo), min(pmax, hi))
 
     # ordering / sort
-    if qp.get("order"):
+    if "w_order_by" not in st.session_state and qp.get("order"):
         st.session_state["w_order_by"] = qp["order"]
-    if "desc" in qp:
+    if "w_order_desc" not in st.session_state and "desc" in qp:
         st.session_state["w_order_desc"] = (str(qp["desc"]) == "1")
 
     # pagination + page size
-    try:
-        st.session_state["page"] = max(0, int(qp.get("page","0")))
-    except Exception:
-        pass
-    try:
-        st.session_state["w_page_size"] = int(qp.get("ps","24"))
-    except Exception:
-        pass
+    if "page" not in st.session_state:
+        try:
+            st.session_state["page"] = max(0, int(qp.get("page","0")))
+        except Exception:
+            pass
+    if "w_page_size" not in st.session_state:
+        try:
+            st.session_state["w_page_size"] = int(qp.get("ps","24"))
+        except Exception:
+            pass
 
     st.session_state["filters_applied"] = True
     LOG.log("Hydrated from query params", qp)
@@ -398,17 +398,52 @@ def fetch_series(item_url: str, n: int = MAX_POINTS) -> pd.DataFrame:
     return df
 
 
+# ============================ Stateful widget helpers ============================
+
+def slider_stateful(key, label, min_value, max_value, value_default, **kwargs):
+    if key in st.session_state:
+        return st.slider(label, min_value=min_value, max_value=max_value, key=key, **kwargs)
+    else:
+        return st.slider(label, min_value=min_value, max_value=max_value, value=value_default, key=key, **kwargs)
+
+def selectbox_stateful(key, label, options, index_default=0, **kwargs):
+    if key in st.session_state:
+        return st.selectbox(label, options=options, key=key, **kwargs)
+    else:
+        return st.selectbox(label, options=options, index=index_default, key=key, **kwargs)
+
+def multiselect_stateful(key, label, options, default_default=None, **kwargs):
+    if key in st.session_state:
+        return st.multiselect(label, options=options, key=key, **kwargs)
+    else:
+        return st.multiselect(label, options=options, default=(default_default or []), key=key, **kwargs)
+
+def toggle_stateful(key, label, value_default=False, **kwargs):
+    if key in st.session_state:
+        return st.toggle(label, key=key, **kwargs)
+    else:
+        return st.toggle(label, value=value_default, key=key, **kwargs)
+
+def select_slider_stateful(key, label, options, value_default=None, **kwargs):
+    if key in st.session_state:
+        return st.select_slider(label, options=options, key=key, **kwargs)
+    else:
+        return st.select_slider(label, options=options, value=value_default, key=key, **kwargs)
+
+
 # ============================ Optional connectivity test ============================
 
-if TEST_PING:
-    try:
-        LOG.log("Ping: MV limit=1")
-        sample, cr = http_get(f"{REST}/{MV}", {"select": "brand,latest_price", "limit": "1"}, label="ping_mv")
-        LOG.log("Ping MV ok", {"content_range": cr, "sample_rows": len(sample)})
-        st.success("Connectivity OK (MV). See logs below.")
-    except Exception as e:
-        LOG.log("Ping MV failed", {"error": str(e)})
-        st.error(f"Ping failed: {e}")
+with st.sidebar:
+    st.markdown("### Quick checks")
+    if st.button("Run connectivity test"):
+        try:
+            LOG.log("Ping: MV limit=1")
+            sample, cr = http_get(f"{REST}/{MV}", {"select": "brand,latest_price", "limit": "1"}, label="ping_mv")
+            LOG.log("Ping MV ok", {"content_range": cr, "sample_rows": len(sample)})
+            st.success("Connectivity OK (MV). See logs below.")
+        except Exception as e:
+            LOG.log("Ping MV failed", {"error": str(e)})
+            st.error(f"Ping failed: {e}")
 
 
 # ============================ UI ============================
@@ -425,28 +460,26 @@ with st.form("filters_form"):
 
     c1, c2, c3 = st.columns(3)
     with c1:
-        chosen_brands = st.multiselect("Brands", options=brands, key="w_brands")
-        category = st.selectbox("Category", options=["(Any)"] + categories, index=0, key="w_category")
+        chosen_brands = multiselect_stateful("w_brands", "Brands", options=brands)
+        category = selectbox_stateful("w_category", "Category", options=["(Any)"] + categories, index_default=0)
     with c2:
-        hits_range = st.slider("Min hits", hmin, max(hmin, hmax), (hmin, max(hmin, hmax)), key="w_hits")
-        price_range = st.slider(
-            "Price range (AED)",
-            float(pmin),
-            float(pmax or max(pmin, pmin + 1)),
+        hits_range = slider_stateful("w_hits", "Min hits", hmin, max(hmin, hmax), (hmin, max(hmin, hmax)))
+        price_range = slider_stateful(
+            "w_price", "Price range (AED)",
+            float(pmin), float(pmax or max(pmin, pmin + 1)),
             (float(pmin), float(pmax or max(pmin, pmin + 1))),
-            key="w_price",
         )
     with c3:
-        drop_prev = st.slider("Drop vs previous (%)", -100, 100, (-100, 100), key="w_drop_prev")
-        drop_30 = st.slider("Drop vs 30-day avg (%)", -100, 100, (-100, 100), key="w_drop_30")
-        drop_90 = st.slider("Drop vs 90-day avg (%)", -100, 100, (-100, 100), key="w_drop_90")
+        drop_prev = slider_stateful("w_drop_prev", "Drop vs previous (%)", -100, 100, (-100, 100))
+        drop_30 = slider_stateful("w_drop_30", "Drop vs 30-day avg (%)", -100, 100, (-100, 100))
+        drop_90 = slider_stateful("w_drop_90", "Drop vs 90-day avg (%)", -100, 100, (-100, 100))
 
     st.markdown("---")
     cA, cB, cC = st.columns(3)
     with cA:
-        order_by = st.selectbox(
-            "Order by",
-            [
+        order_by = selectbox_stateful(
+            "w_order_by", "Order by",
+            options=[
                 "delta_vs_30d_pct",
                 "delta_vs_90d_pct",
                 "drop_pct_vs_prev",
@@ -455,19 +488,18 @@ with st.form("filters_form"):
                 "gap_to_second_lowest_pct",
                 "days_since_first_low",
             ],
-            index=0,
-            key="w_order_by",
+            index_default=0,
         )
     with cB:
-        order_desc = st.toggle("Sort descending", True, key="w_order_desc")
+        order_desc = toggle_stateful("w_order_desc", "Sort descending", True)
     with cC:
-        page_size = st.select_slider("Page size", options=[12, 24, 48, 96], value=24, key="w_page_size")
+        page_size = select_slider_stateful("w_page_size", "Page size", options=[12, 24, 48, 96], value_default=24)
 
     submitted = st.form_submit_button("Apply Filters", use_container_width=True)
     if submitted:
         st.session_state["filters_applied"] = True
         st.session_state["page"] = 0  # reset to first page
-        encode_filters_to_qp()        # persist in URL (no double-encode)
+        encode_filters_to_qp()        # persist in URL
         LOG.log("Form submitted", {"submitted": True})
 
 # If filters weren't applied yet, don't render results
