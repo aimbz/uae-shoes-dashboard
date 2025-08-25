@@ -10,7 +10,7 @@ import time
 import json
 import platform
 from datetime import datetime, timezone
-from urllib.parse import quote
+# from urllib.parse import quote  # not needed after fix
 
 import pandas as pd
 import requests
@@ -32,8 +32,7 @@ class DiagLog:
         entry = {"ts": ts, "msg": str(msg)}
         if data is not None:
             try:
-                # ensure JSON-serializable for pretty view
-                json.dumps(data)
+                json.dumps(data)  # ensure JSON-serializable for pretty view
                 entry["data"] = data
             except Exception:
                 entry["data"] = str(data)
@@ -151,13 +150,11 @@ def http_get(url: str, params: dict, label: str = "") -> tuple[list, str | None]
             LOG.log("HTTP GET end", meta)
 
         if not r.ok:
-            # Surface body but avoid giant dumps
             body_preview = r.text[:1000]
             LOG.log("HTTP error body (preview)", {"body": body_preview})
             st.error(f"Supabase REST error: {r.status_code}\n{body_preview}")
             st.stop()
 
-        # Try JSON parse with guard
         try:
             js = r.json()
         except Exception as e:
@@ -186,6 +183,14 @@ def pct_fmt(x) -> str:
         return f"{float(x)*100:.1f}%"
     except Exception:
         return "—"
+
+
+# Compatibility helper for st.image keyword changes across versions
+def img_show(url: str):
+    try:
+        st.image(url, use_container_width=True)
+    except TypeError:
+        st.image(url, use_column_width=True)
 
 
 # ============================ Option loaders (cached) ============================
@@ -222,6 +227,7 @@ def build_params(flt: dict, limit: int, offset: int) -> dict:
         "order": f"{flt['order_by']}.{ 'desc' if flt['order_desc'] else 'asc'}",
         "limit": str(limit),
         "offset": str(offset),
+        # removed "count": "exact" (Prefer header already set)
     }
     if flt["brands"]:
         p["brand"] = pg_in(flt["brands"])
@@ -267,9 +273,10 @@ def fetch_items(flt: dict, page: int, page_size: int) -> tuple[pd.DataFrame, int
 
 @st.cache_data(ttl=300)
 def fetch_series(item_url: str, limit: int = 5000) -> pd.DataFrame:
+    # IMPORTANT: don't pre-quote; requests encodes automatically.
     params = {
         "select": "timestamp,price",
-        "url": f"eq.{quote(item_url, safe='')}",
+        "url": f"eq.{item_url}",
         "order": "timestamp.asc",
         "limit": str(limit),
     }
@@ -277,8 +284,14 @@ def fetch_series(item_url: str, limit: int = 5000) -> pd.DataFrame:
     data, _ = http_get(f"{REST}/{PRICES}", params, label="fetch_series")
     df = pd.DataFrame(data)
     if not df.empty:
-        df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True).dt.tz_convert("Asia/Beirut")
-    LOG.log("fetch_series result", {"url_preview": item_url[:60] + "…", "rows": len(df), "elapsed_s": round(time.perf_counter() - t0, 3)})
+        # Make tz-aware in UTC then convert to Beirut
+        ts = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
+        df["timestamp"] = ts.dt.tz_convert("Asia/Beirut")
+    LOG.log("fetch_series result", {
+        "url_preview": item_url[:60] + "…",
+        "rows": len(df),
+        "elapsed_s": round(time.perf_counter() - t0, 3)
+    })
     return df
 
 
@@ -402,7 +415,7 @@ for r in range(rows):
                 left, right = st.columns([1, 2])
                 with left:
                     if row.get("image_link"):
-                        st.image(row["image_link"], use_column_width=True)
+                        img_show(row["image_link"])
                 with right:
                     st.markdown(f"**{row.get('brand','')}**")
                     st.markdown(row.get("title", ""))
@@ -420,27 +433,35 @@ for r in range(rows):
                     st.metric("90d Δ", pct_fmt(row.get("delta_vs_90d_pct")))
                     st.caption(f"2nd-lowest gap: {pct_fmt(row.get('gap_to_second_lowest_pct'))}")
 
-                with st.expander("Price history (AED)"):
-                    ts0 = time.perf_counter()
-                    ts = fetch_series(row["url"])
-                    if ts.empty:
-                        st.info("No time-series data.")
-                    else:
-                        import altair as alt
-                        chart = (
-                            alt.Chart(ts)
-                            .mark_line()
-                            .encode(
-                                x=alt.X("timestamp:T", title="Time (Asia/Beirut)"),
-                                y=alt.Y("price:Q", title="Price (AED)"),
-                                tooltip=["timestamp:T", "price:Q"],
+                # ---- On-demand price history (lazy loaded to protect DB) ----
+                with st.expander("Price history (AED)", expanded=False):
+                    clicked_flag = f"clicked_{i}"
+                    load_key = f"load_hist_{i}"
+                    if st.button("Load price history", key=load_key, use_container_width=True):
+                        st.session_state[clicked_flag] = True
+
+                    if st.session_state.get(clicked_flag):
+                        with st.spinner("Fetching history…"):
+                            ts = fetch_series(row["url"])
+                        if ts.empty:
+                            st.info("No time-series data.")
+                        else:
+                            import altair as alt
+                            chart = (
+                                alt.Chart(ts)
+                                .mark_line()
+                                .encode(
+                                    x=alt.X("timestamp:T", title="Time (Asia/Beirut)"),
+                                    y=alt.Y("price:Q", title="Price (AED)"),
+                                    tooltip=["timestamp:T", "price:Q"],
+                                )
+                                .properties(height=220)
                             )
-                            .properties(height=220)
-                        )
-                        st.altair_chart(chart, use_container_width=True)
-                    LOG.log("Rendered series chart", {"url_preview": row["url"][:60] + "…", "elapsed_s": round(time.perf_counter() - ts0, 3)})
+                            st.altair_chart(chart, use_container_width=True)
+                        LOG.log("Rendered series chart (on-demand)", {
+                            "url_preview": row["url"][:60] + "…",
+                            "clicked_key": load_key
+                        })
 
 # Final: render logs
 LOG.render()
-
-
