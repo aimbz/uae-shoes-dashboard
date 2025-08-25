@@ -325,7 +325,7 @@ def http_get(url: str, params: dict, label: str = "") -> tuple[list, str | None]
 # ============================ Data loaders (cached) ============================
 
 @st.cache_data(ttl=300)
-def _scan_distinct_values_from_mv(col: str, page_size: int = 2000) -> list[str]:
+def _scan_distinct_values_from_mv(col: str, page_size: int = 1000) -> list[str]:
     """Read ALL non-null values for a column from the MV by paging."""
     values: list[str] = []
     offset = 0
@@ -707,6 +707,7 @@ for r in range(rows):
 
 # Final: logs
 LOG.render()
+
 
 
 
