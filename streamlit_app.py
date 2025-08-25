@@ -1,9 +1,9 @@
 # streamlit_app.py
 # UAE Men Shoes — Global Lows (Supabase REST API + Streamlit)
 # Stable filters in URL + Plotly (last 200 points) + diagnostics
-# Card tweaks: full-width image, 4 items/row, smaller metric fonts
+# UI tweaks: clickable full-width image, 4 cards/row, equalized heights, responsive fonts
 
-# --- Disable Streamlit file watcher BEFORE importing streamlit (fixes inotify crash) ---
+# --- Disable Streamlit file watcher BEFORE importing streamlit (avoids inotify limit crash) ---
 import os
 os.environ["STREAMLIT_SERVER_FILE_WATCHER_TYPE"] = "none"
 
@@ -92,20 +92,63 @@ def boot_diag():
 st.set_page_config(page_title="UAE Men Shoes — Global Lows", layout="wide")
 boot_diag()
 
-# Global CSS: slimmer metrics + tighter cards + responsive tweaks
+# Global CSS: responsive fonts, equalized card blocks, clean spacing
 st.markdown("""
 <style>
-/* Metric value & label smaller */
-div[data-testid="stMetric"] div[data-testid="stMetricValue"] { font-size: 1.25rem; line-height: 1.2; }
-div[data-testid="stMetric"] div[data-testid="stMetricLabel"] { font-size: 0.8rem; color: #6b7280; }
+/* -------- Responsive font sizes (scale down on narrow viewports) -------- */
+:root{
+  --brand-size: clamp(0.9rem, 1.2vw, 1.05rem);
+  --title-size: clamp(0.85rem, 1.1vw, 0.98rem);
+  --metric-value: clamp(0.95rem, 1.4vw, 1.25rem);
+  --metric-label: clamp(0.70rem, 1.0vw, 0.85rem);
+}
+
+/* Tighter page padding */
+.block-container { padding-top: 0.75rem; }
+
+/* Metric sizes */
+div[data-testid="stMetric"] div[data-testid="stMetricValue"] { font-size: var(--metric-value); line-height: 1.15; }
+div[data-testid="stMetric"] div[data-testid="stMetricLabel"] { font-size: var(--metric-label); color: #6b7280; }
 div[data-testid="stMetricDelta"] { font-size: 0.9rem; }
 
-/* Card spacing */
-.block-container { padding-top: 1rem; }
-.st-emotion-cache-16idsys p { margin-bottom: 0.25rem; } /* tighten st.markdown paragraphs */
+/* Our custom pieces inside each card */
+.card-brand{ font-weight: 600; font-size: var(--brand-size); margin: .35rem 0 .15rem; }
+.card-title{
+  font-size: var(--title-size);
+  color: #374151;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;         /* clamp to 2 lines to stabilize height */
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  min-height: 2.6em;              /* reserve space so all cards line up */
+  margin: 0 0 .4rem 0;
+}
 
-/* Make images nicely rounded in cards */
-img { border-radius: 12px; }
+/* Thumbnail: fixed aspect ratio so rows align, full width, rounded */
+.card-thumb{
+  width: 100%;
+  aspect-ratio: 1 / 1;            /* square box */
+  object-fit: contain;
+  background: #fff;
+  border-radius: 12px;
+  display: block;
+}
+
+/* Make the collapsed expander header compact */
+button[aria-expanded="false"] p { margin-bottom: 0; }
+
+/* Ensure Streamlit containers inside columns stretch nicely */
+div[data-testid="stVerticalBlock"] > div:has(> div[data-testid="stVerticalBlock"]) { height: 100%; }
+
+/* Small screens: nudge sizes down a bit more */
+@media (max-width: 1100px){
+  :root{
+    --brand-size: clamp(0.85rem, 1.3vw, 1rem);
+    --title-size: clamp(0.80rem, 1.05vw, 0.92rem);
+    --metric-value: clamp(0.90rem, 1.3vw, 1.15rem);
+    --metric-label: clamp(0.65rem, 0.9vw, 0.80rem);
+  }
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -367,7 +410,7 @@ def fetch_series(item_url: str, n: int = MAX_POINTS) -> pd.DataFrame:
     params = {
         "select": "timestamp,price",
         "url": f"eq.{item_url}",
-        "order": "timestamp.desc",
+        "order": "timestamp.desc",  # newest first
         "limit": str(n),
     }
 
@@ -525,6 +568,8 @@ flt = {
     "order_desc": st.session_state.get("w_order_desc", True),
 }
 
+# ============================ Results ============================
+
 # Pagination controls
 page = st.session_state.get("page", 0)
 prev_col, _, next_col = st.columns([1, 6, 1])
@@ -543,7 +588,7 @@ page = st.session_state.get("page", 0)
 page_size = st.session_state.get("w_page_size", 24)
 LOG.log("Pagination", {"page": page, "page_size": page_size})
 
-# Data fetch
+# Fetch
 df, total = fetch_items(flt, page, page_size)
 if df.empty:
     st.warning("No items match your filters.")
@@ -553,9 +598,19 @@ if df.empty:
 
 st.caption(f"Matches: {total if total is not None else '—'}  •  Page {page + 1}")
 
-# ============================ Cards grid (4 per row) ============================
+# ============================ Cards grid (4 per row, equalized heights) ============================
 
-ncols = 4  # <-- 4 items per row (Streamlit will stack on small screens)
+def html_escape(s: str) -> str:
+    return (
+        str(s)
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+        .replace("'", "&#39;")
+    )
+
+ncols = 4  # 4 items per row; Streamlit stacks on very small screens
 rows = math.ceil(len(df) / ncols)
 LOG.log("Rendering grid", {"rows": rows, "n_items": len(df), "ncols": ncols})
 
@@ -568,15 +623,22 @@ for r in range(rows):
         row = df.iloc[i]
         with cols[c]:
             with st.container(border=True):
-                # Full-width image on top (button removed as requested)
+                # ---------- Clickable full-width image (keeps rows even via aspect ratio) ----------
                 if row.get("image_link"):
-                    st.image(row["image_link"], use_column_width=True)
+                    link = row.get("url") or "#"
+                    img = html_escape(row.get("image_link", ""))
+                    alt = html_escape(row.get("title", "") or row.get("brand","") or "product")
+                    st.markdown(
+                        f'<a href="{link}" target="_blank" rel="noopener">'
+                        f'<img class="card-thumb" src="{img}" alt="{alt}"/></a>',
+                        unsafe_allow_html=True,
+                    )
 
-                # Brand & title
-                st.markdown(f"**{row.get('brand','')}**")
-                st.markdown(row.get("title", ""))
+                # Brand & title with clamped height -> equalizes cards
+                st.markdown(f'<div class="card-brand">{html_escape(row.get("brand",""))}</div>', unsafe_allow_html=True)
+                st.markdown(f'<div class="card-title">{html_escape(row.get("title",""))}</div>', unsafe_allow_html=True)
 
-                # 3 small metrics in a row
+                # Metrics (smaller, responsive)
                 m1, m2, m3 = st.columns(3)
                 with m1:
                     st.metric("Latest (AED)", f"{row.get('latest_price', 0):.2f}")
@@ -588,19 +650,14 @@ for r in range(rows):
                     st.metric("90d Δ", pct_fmt(row.get("delta_vs_90d_pct")))
                     st.caption(f"2nd-lowest gap: {pct_fmt(row.get('gap_to_second_lowest_pct'))}")
 
-                # Price history
+                # Price history (last 200 points, cached)
                 with st.expander("📈 Price History (AED)", expanded=False):
                     ts = fetch_series(row["url"], n=MAX_POINTS)
                     if ts.empty:
                         st.info("No time-series data.")
                     else:
                         fig = go.Figure()
-                        fig.add_trace(go.Scatter(
-                            x=ts["timestamp"],
-                            y=ts["price"],
-                            mode="lines+markers",
-                            name="Price",
-                        ))
+                        fig.add_trace(go.Scatter(x=ts["timestamp"], y=ts["price"], mode="lines+markers", name="Price"))
                         fig.update_layout(
                             xaxis_title="Date (Asia/Beirut)",
                             yaxis_title="AED",
@@ -610,5 +667,5 @@ for r in range(rows):
                         st.plotly_chart(fig, use_container_width=True)
                     LOG.log("Rendered series chart (lastN)", {"url_preview": str(row.get('url',''))[:60] + "…", "points": len(ts)})
 
-# Final: render logs
+# Final: logs
 LOG.render()
