@@ -222,7 +222,6 @@ def build_params(flt: dict, limit: int, offset: int) -> dict:
         "order": f"{flt['order_by']}.{ 'desc' if flt['order_desc'] else 'asc'}",
         "limit": str(limit),
         "offset": str(offset),
-        "count": "exact",
     }
     if flt["brands"]:
         p["brand"] = pg_in(flt["brands"])
@@ -443,3 +442,4 @@ for r in range(rows):
 
 # Final: render logs
 LOG.render()
+
