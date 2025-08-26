@@ -605,16 +605,19 @@ for r in range(rows):
                 st.markdown(f'<div class="card-title">{html_escape(row.get("title",""))}</div>', unsafe_allow_html=True)
 
                 latest_aed = float(row.get("latest_price") or 0.0)
+
+                # USD = Price * 0.282 * (1 - Cashback) + Shipping
                 usd = (latest_aed * AED_TO_USD * (1.0 - cashback_frac)) + ship_usd
+
+                # Landed = USD * (1 + Margin)
                 landed_usd = usd * (1.0 + margin_frac)
 
-                # Two-column compact metrics
                 left_col, right_col = st.columns(2)
                 with left_col:
                     st.metric("Latest (AED)", f"{latest_aed:.2f}")
-                    st.markdown(f'<div class="usd-red">≈ ${usd_base:,.2f} USD</div>', unsafe_allow_html=True)
                     st.markdown(f'<div class="usd-red">≈ ${usd:,.2f} USD</div>', unsafe_allow_html=True)
                     st.markdown(f'<div class="usd-landed">Landed: ${landed_usd:,.2f}</div>', unsafe_allow_html=True)
+
 
                 with right_col:
                     st.metric("Drop vs prev", pct_fmt(row.get("drop_pct_vs_prev")))
@@ -635,5 +638,6 @@ for r in range(rows):
 
 # Logs (collapsed)
 LOG.render()
+
 
 
