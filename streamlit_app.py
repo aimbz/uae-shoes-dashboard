@@ -2,6 +2,7 @@
 # UAE Men Shoes — Global Lows (Supabase REST API + Streamlit)
 # Stable filters in URL + Plotly (last 200 points) + diagnostics
 # UI: clickable full-width image, 4 cards/row, equalized heights, responsive fonts
+# New: Shipping/Margin/Cashback filters + USD conversion + landed USD
 
 # --- Disable Streamlit file watcher BEFORE importing streamlit (avoids inotify limit crash) ---
 import os
@@ -125,6 +126,7 @@ div[data-testid="stMetricDelta"] { font-size: 0.9rem; }
   border-radius: 12px;
   display: block;
 }
+.usd-red{ color:#dc2626; font-weight:600; margin:.15rem 0 .15rem; }
 button[aria-expanded="false"] p { margin-bottom: 0; }
 div[data-testid="stVerticalBlock"] > div:has(> div[data-testid="stVerticalBlock"]) { height: 100%; }
 @media (max-width: 1100px){
@@ -205,6 +207,9 @@ def encode_filters_to_qp():
     desc = 1 if st.session_state.get("w_order_desc", True) else 0
     page = st.session_state.get("page", 0)
     ps = st.session_state.get("w_page_size", 24)
+    ship = st.session_state.get("w_ship_usd", 7)
+    margin = st.session_state.get("w_margin_pct", 25)
+    cashback = st.session_state.get("w_cashback_pct", 0)
     qp_set({
         "applied": "1",
         "brands": ",".join(brands) if brands else "",
@@ -215,6 +220,9 @@ def encode_filters_to_qp():
         "desc": str(desc),
         "page": str(page),
         "ps": str(ps),
+        "ship": str(ship),
+        "m": str(margin),
+        "cb": str(cashback),
     })
 
 def parse_range(s: str, cast=float):
@@ -224,9 +232,15 @@ def parse_range(s: str, cast=float):
     except Exception:
         return None
 
+def parse_float(s, default=0.0):
+    try:
+        return float(s)
+    except Exception:
+        return default
+
 def hydrate_from_qp(brands_opts, categories_opts, pmin, pmax, hmin, hmax):
     qp = qp_get()
-    if not qp or (qp.get("applied") != "1" and not any(qp.get(k) for k in ("brands","category","order","price","hits"))):
+    if not qp or (qp.get("applied") != "1" and not any(qp.get(k) for k in ("brands","category","order","price","hits","ship","m","cb"))):
         return
     if "w_brands" not in st.session_state and qp.get("brands"):
         picked = [b for b in qp["brands"].split(",") if b]
@@ -258,6 +272,14 @@ def hydrate_from_qp(brands_opts, categories_opts, pmin, pmax, hmin, hmax):
             st.session_state["w_page_size"] = int(qp.get("ps","24"))
         except Exception:
             pass
+    # New: hydrate shipping/margin/cashback
+    if "w_ship_usd" not in st.session_state and "ship" in qp:
+        st.session_state["w_ship_usd"] = parse_float(qp.get("ship"), 7.0)
+    if "w_margin_pct" not in st.session_state and "m" in qp:
+        st.session_state["w_margin_pct"] = parse_float(qp.get("m"), 25.0)
+    if "w_cashback_pct" not in st.session_state and "cb" in qp:
+        st.session_state["w_cashback_pct"] = parse_float(qp.get("cb"), 0.0)
+
     st.session_state["filters_applied"] = True
     LOG.log("Hydrated from query params", qp)
 
@@ -373,6 +395,8 @@ def load_options():
 
 # ============================ Utilities ============================
 
+AED_TO_USD = 0.282
+
 def pg_in(values: list[str]) -> str:
     esc = [v.replace('"', '""') for v in values]
     return 'in.(' + ",".join([f'"{e}"' for e in esc]) + ')'
@@ -382,6 +406,12 @@ def pct_fmt(x) -> str:
         return f"{float(x)*100:.1f}%"
     except Exception:
         return "—"
+
+def clamp01(x: float) -> float:
+    try:
+        return max(0.0, min(1.0, float(x)))
+    except Exception:
+        return 0.0
 
 
 def build_params(flt: dict, limit: int, offset: int) -> dict:
@@ -483,6 +513,12 @@ def select_slider_stateful(key, label, options, value_default=None, **kwargs):
     else:
         return st.select_slider(label, options=options, value=value_default, key=key, **kwargs)
 
+def number_stateful(key, label, value_default, **kwargs):
+    if key in st.session_state:
+        return st.number_input(label, key=key, **kwargs)
+    else:
+        return st.number_input(label, value=value_default, key=key, **kwargs)
+
 
 # ============================ Sidebar (single block; unique keys) ============================
 
@@ -524,6 +560,17 @@ hydrate_from_qp(brands, categories, pmin, pmax, hmin, hmax)
 
 with st.form("filters_form"):
     st.subheader("Filters (choose, then Apply)")
+
+    # ---- New: Costs & Adjustments row (Shipping/Margin/Cashback) ----
+    cc1, cc2, cc3 = st.columns(3)
+    with cc1:
+        ship_usd = number_stateful("w_ship_usd", "Shipping (USD)", 7.0, min_value=0.0, step=0.5, help="Flat shipping in USD")
+    with cc2:
+        margin_pct = number_stateful("w_margin_pct", "Margin (%)", 25.0, min_value=0.0, step=1.0, help="Your markup percent")
+    with cc3:
+        cashback_pct = number_stateful("w_cashback_pct", "Cashback (%)", 0.0, min_value=0.0, step=1.0, help="Cashback percent")
+
+    st.markdown("---")
 
     c1, c2, c3 = st.columns(3)
     with c1:
@@ -590,6 +637,11 @@ flt = {
     "order_by": st.session_state.get("w_order_by"),
     "order_desc": st.session_state.get("w_order_desc", True),
 }
+
+# Pull user cost inputs (coalesce to zero when missing)
+ship_usd = float(st.session_state.get("w_ship_usd") or 0.0)
+margin_frac = clamp01((st.session_state.get("w_margin_pct") or 0.0) / 100.0)
+cashback_frac = clamp01((st.session_state.get("w_cashback_pct") or 0.0) / 100.0)
 
 # ============================ Results ============================
 
@@ -661,10 +713,16 @@ for r in range(rows):
                 st.markdown(f'<div class="card-brand">{html_escape(row.get("brand",""))}</div>', unsafe_allow_html=True)
                 st.markdown(f'<div class="card-title">{html_escape(row.get("title",""))}</div>', unsafe_allow_html=True)
 
-                # Metrics (compact, responsive)
+                # Metrics (compact, responsive) + USD conversion & landed calc
                 m1, m2, m3 = st.columns(3)
+                latest_aed = float(row.get("latest_price") or 0.0)
+                usd_base = latest_aed * AED_TO_USD
+                landed_usd = (usd_base * (1.0 - cashback_frac) * (1.0 + margin_frac)) + ship_usd
+
                 with m1:
-                    st.metric("Latest (AED)", f"{row.get('latest_price', 0):.2f}")
+                    st.metric("Latest (AED)", f"{latest_aed:.2f}")
+                    st.markdown(f'<div class="usd-red">≈ ${usd_base:,.2f} USD</div>', unsafe_allow_html=True)
+                    st.caption(f"Est. landed: ${landed_usd:,.2f}")
                     st.caption(f"Min hits: {row.get('min_hits', '—')}")
                 with m2:
                     st.metric("Drop vs prev", pct_fmt(row.get("drop_pct_vs_prev")))
