@@ -613,8 +613,8 @@ for r in range(rows):
                 with left_col:
                     st.metric("Latest (AED)", f"{latest_aed:.2f}")
                     st.markdown(f'<div class="usd-red">≈ ${usd_base:,.2f} USD</div>', unsafe_allow_html=True)
-st.markdown(f'<div class="usd-red">≈ ${usd:,.2f} USD</div>', unsafe_allow_html=True)
-st.markdown(f'<div class="usd-landed">Landed: ${landed_usd:,.2f}</div>', unsafe_allow_html=True)
+                    st.markdown(f'<div class="usd-red">≈ ${usd:,.2f} USD</div>', unsafe_allow_html=True)
+                    st.markdown(f'<div class="usd-landed">Landed: ${landed_usd:,.2f}</div>', unsafe_allow_html=True)
 
                 with right_col:
                     st.metric("Drop vs prev", pct_fmt(row.get("drop_pct_vs_prev")))
@@ -635,4 +635,5 @@ st.markdown(f'<div class="usd-landed">Landed: ${landed_usd:,.2f}</div>', unsafe_
 
 # Logs (collapsed)
 LOG.render()
+
 
