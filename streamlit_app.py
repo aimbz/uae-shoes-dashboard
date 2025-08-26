@@ -520,9 +520,9 @@ def clamp01(x: float) -> float:
     try: return max(0.0, min(1.0, float(x)))
     except Exception: return 0.0
 
-ship_usd = float(st.session_state.get("w_ship_usd") or 0.0)
-margin_frac = clamp01((st.session_state.get("w_margin_pct") or 0.0) / 100.0)
 cashback_frac = clamp01((st.session_state.get("w_cashback_pct") or 0.0) / 100.0)
+margin_frac   = clamp01((st.session_state.get("w_margin_pct")   or 0.0) / 100.0)
+ship_usd      = float(st.session_state.get("w_ship_usd")        or 0.0)
 
 # ============================ Results ============================
 
@@ -605,16 +605,16 @@ for r in range(rows):
                 st.markdown(f'<div class="card-title">{html_escape(row.get("title",""))}</div>', unsafe_allow_html=True)
 
                 latest_aed = float(row.get("latest_price") or 0.0)
-                usd_base = latest_aed * AED_TO_USD
-                landed_usd = (usd_base * (1.0 - cashback_frac) * (1.0 + margin_frac)) + ship_usd
+                usd = (latest_aed * AED_TO_USD * (1.0 - cashback_frac)) + ship_usd
+                landed_usd = usd * (1.0 + margin_frac)
 
                 # Two-column compact metrics
                 left_col, right_col = st.columns(2)
                 with left_col:
                     st.metric("Latest (AED)", f"{latest_aed:.2f}")
                     st.markdown(f'<div class="usd-red">≈ ${usd_base:,.2f} USD</div>', unsafe_allow_html=True)
-                    st.markdown(f'<div class="usd-landed">Landed: ${landed_usd:,.2f}</div>', unsafe_allow_html=True)
-                    st.markdown(f'<div class="small-cap">Min hits: {row.get("min_hits", "—")}</div>', unsafe_allow_html=True)
+st.markdown(f'<div class="usd-red">≈ ${usd:,.2f} USD</div>', unsafe_allow_html=True)
+st.markdown(f'<div class="usd-landed">Landed: ${landed_usd:,.2f}</div>', unsafe_allow_html=True)
 
                 with right_col:
                     st.metric("Drop vs prev", pct_fmt(row.get("drop_pct_vs_prev")))
@@ -635,3 +635,4 @@ for r in range(rows):
 
 # Logs (collapsed)
 LOG.render()
+
