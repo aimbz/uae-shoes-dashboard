@@ -1,7 +1,7 @@
 # streamlit_app.py
 # UAE Men Shoes — Global Lows (Supabase REST API + Streamlit)
 # Stable filters in URL + Plotly (last 200 points) + diagnostics
-# UI tweaks: clickable full-width image, 4 cards/row, equalized heights, responsive fonts
+# UI: clickable full-width image, 4 cards/row, equalized heights, responsive fonts
 
 # --- Disable Streamlit file watcher BEFORE importing streamlit (avoids inotify limit crash) ---
 import os
@@ -45,12 +45,13 @@ class DiagLog:
         self.buf = st.session_state["_diag_log"]
 
     def render(self):
-        with st.expander("🧰 Logs (diagnostics)", expanded=True):
+        # Keep collapsed by default; cap entries to reduce DOM churn
+        with st.expander("🧰 Logs (diagnostics)", expanded=False):
             st.caption("Detailed boot/runtime logs (safe: no secrets)")
             if not self.buf:
                 st.write("No logs yet.")
                 return
-            for e in self.buf[-200:]:
+            for e in self.buf[-120:]:
                 st.write(f"[{e['ts']}] {e['msg']}")
                 if "data" in e:
                     try:
@@ -95,52 +96,37 @@ boot_diag()
 # Global CSS: responsive fonts, equalized card blocks, clean spacing
 st.markdown("""
 <style>
-/* -------- Responsive font sizes (scale down on narrow viewports) -------- */
 :root{
   --brand-size: clamp(0.9rem, 1.2vw, 1.05rem);
   --title-size: clamp(0.85rem, 1.1vw, 0.98rem);
   --metric-value: clamp(0.95rem, 1.4vw, 1.25rem);
   --metric-label: clamp(0.70rem, 1.0vw, 0.85rem);
 }
-
-/* Tighter page padding */
 .block-container { padding-top: 0.75rem; }
-
-/* Metric sizes */
 div[data-testid="stMetric"] div[data-testid="stMetricValue"] { font-size: var(--metric-value); line-height: 1.15; }
 div[data-testid="stMetric"] div[data-testid="stMetricLabel"] { font-size: var(--metric-label); color: #6b7280; }
 div[data-testid="stMetricDelta"] { font-size: 0.9rem; }
-
-/* Our custom pieces inside each card */
 .card-brand{ font-weight: 600; font-size: var(--brand-size); margin: .35rem 0 .15rem; }
 .card-title{
   font-size: var(--title-size);
   color: #374151;
   display: -webkit-box;
-  -webkit-line-clamp: 2;         /* clamp to 2 lines to stabilize height */
+  -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
-  min-height: 2.6em;              /* reserve space so all cards line up */
+  min-height: 2.6em;
   margin: 0 0 .4rem 0;
 }
-
-/* Thumbnail: fixed aspect ratio so rows align, full width, rounded */
 .card-thumb{
   width: 100%;
-  aspect-ratio: 1 / 1;            /* square box */
+  aspect-ratio: 1 / 1;
   object-fit: contain;
   background: #fff;
   border-radius: 12px;
   display: block;
 }
-
-/* Make the collapsed expander header compact */
 button[aria-expanded="false"] p { margin-bottom: 0; }
-
-/* Ensure Streamlit containers inside columns stretch nicely */
 div[data-testid="stVerticalBlock"] > div:has(> div[data-testid="stVerticalBlock"]) { height: 100%; }
-
-/* Small screens: nudge sizes down a bit more */
 @media (max-width: 1100px){
   :root{
     --brand-size: clamp(0.85rem, 1.3vw, 1rem);
@@ -219,7 +205,6 @@ def encode_filters_to_qp():
     desc = 1 if st.session_state.get("w_order_desc", True) else 0
     page = st.session_state.get("page", 0)
     ps = st.session_state.get("w_page_size", 24)
-
     qp_set({
         "applied": "1",
         "brands": ",".join(brands) if brands else "",
@@ -243,32 +228,26 @@ def hydrate_from_qp(brands_opts, categories_opts, pmin, pmax, hmin, hmax):
     qp = qp_get()
     if not qp or (qp.get("applied") != "1" and not any(qp.get(k) for k in ("brands","category","order","price","hits"))):
         return
-
     if "w_brands" not in st.session_state and qp.get("brands"):
         picked = [b for b in qp["brands"].split(",") if b]
         st.session_state["w_brands"] = [b for b in picked if b in brands_opts]
-
     if "w_category" not in st.session_state:
         cat = qp.get("category", "")
         st.session_state["w_category"] = cat if cat in categories_opts else "(Any)"
-
     if "w_hits" not in st.session_state:
         r = parse_range(qp.get("hits",""), int)
         if r:
             lo, hi = r
             st.session_state["w_hits"] = (max(hmin, lo), min(hmax, hi))
-
     if "w_price" not in st.session_state:
         r = parse_range(qp.get("price",""), float)
         if r:
             lo, hi = r
             st.session_state["w_price"] = (max(pmin, lo), min(pmax, hi))
-
     if "w_order_by" not in st.session_state and qp.get("order"):
         st.session_state["w_order_by"] = qp["order"]
     if "w_order_desc" not in st.session_state and "desc" in qp:
         st.session_state["w_order_desc"] = (str(qp["desc"]) == "1")
-
     if "page" not in st.session_state:
         try:
             st.session_state["page"] = max(0, int(qp.get("page","0")))
@@ -279,7 +258,6 @@ def hydrate_from_qp(brands_opts, categories_opts, pmin, pmax, hmin, hmax):
             st.session_state["w_page_size"] = int(qp.get("ps","24"))
         except Exception:
             pass
-
     st.session_state["filters_applied"] = True
     LOG.log("Hydrated from query params", qp)
 
@@ -288,7 +266,7 @@ def hydrate_from_qp(brands_opts, categories_opts, pmin, pmax, hmin, hmax):
 
 def http_get(url: str, params: dict, label: str = "") -> tuple[list, str | None]:
     t0 = time.perf_counter()
-    if st.session_state.get("t_verbose", True):
+    if st.session_state.get("t_verbose", False):
         LOG.log("HTTP GET start", {"label": label, "url": url, "params": params})
     try:
         r = requests.get(url, params=params, headers=HDR, timeout=60)
@@ -302,7 +280,7 @@ def http_get(url: str, params: dict, label: str = "") -> tuple[list, str | None]
             "content_range": r.headers.get("content-range"),
             "ratelimit-remaining": r.headers.get("x-ratelimit-remaining"),
         }
-        if st.session_state.get("t_verbose", True):
+        if st.session_state.get("t_verbose", False):
             LOG.log("HTTP GET end", meta)
         if not r.ok:
             body_preview = r.text[:1000]
@@ -326,34 +304,50 @@ def http_get(url: str, params: dict, label: str = "") -> tuple[list, str | None]
 
 @st.cache_data(ttl=300)
 def _scan_distinct_values_from_mv(col: str, page_size: int = 1000) -> list[str]:
-    """Read ALL non-null values for a column from the MV by paging."""
-    values: list[str] = []
+    """
+    Read ALL non-null values for a column from the MV by paging.
+    Uses Content-Range to determine total. Deduplicates client-side.
+    """
+    values: set[str] = set()
     offset = 0
+    total = None
+
     while True:
         params = {
             "select": col,
-            col: "not.is.null",              # correct PostgREST syntax
+            col: "not.is.null",
             "order": f"{col}.asc",
             "limit": str(page_size),
             "offset": str(offset),
         }
-        chunk, _ = http_get(f"{REST}/{MV}", params, label=f"scan:{col}")
+        chunk, content_range = http_get(f"{REST}/{MV}", params, label=f"scan:{col}")
+
+        if total is None and content_range and "/" in content_range:
+            try:
+                total = int(content_range.split("/")[-1])
+            except Exception:
+                total = None
+
         if not chunk:
             break
-        values.extend([r.get(col) for r in chunk if r.get(col) is not None])
-        # stop when fewer than a full page came back
-        if len(chunk) < page_size:
+
+        for r in chunk:
+            v = r.get(col)
+            if v is not None:
+                values.add(str(v))
+
+        offset += len(chunk)
+        if total is not None and offset >= total:
             break
-        offset += page_size
-    # unique while preserving as strings (raw values kept for filtering)
-    uniq = sorted({str(v) for v in values})
-    LOG.log(f"scan {col}", {"pagesize": page_size, "total_vals": len(values), "unique": len(uniq)})
-    return uniq
+        if len(chunk) == 0:
+            break
+
+    return sorted(values, key=lambda s: s.lower())
 
 
 @st.cache_data(ttl=300)
 def load_options():
-    # Read ALL brands/categories from the MATERIALIZED VIEW (not the prices table)
+    # Read ALL brands/categories from MV
     brands = _scan_distinct_values_from_mv("brand", page_size=1000)
     categories = _scan_distinct_values_from_mv("category", page_size=1000)
 
@@ -377,9 +371,6 @@ def load_options():
     return brands, categories, float(pmin), float(pmax), int(hmin), int(hmax)
 
 
-
-
-
 # ============================ Utilities ============================
 
 def pg_in(values: list[str]) -> str:
@@ -394,10 +385,11 @@ def pct_fmt(x) -> str:
 
 
 def build_params(flt: dict, limit: int, offset: int) -> dict:
+    direction = "desc" if flt["order_desc"] else "asc"
     p: dict[str, list | str] = {
         "select": "*",
         "has_higher": "eq.true",
-        "order": f"{flt['order_by']}.{ 'desc' if flt['order_desc'] else 'asc'}",
+        "order": f"{flt['order_by']}.{direction}.nullslast,latest_price.asc,brand.asc",
         "limit": str(limit),
         "offset": str(offset),
     }
@@ -442,20 +434,16 @@ def fetch_series(item_url: str, n: int = MAX_POINTS) -> pd.DataFrame:
     params = {
         "select": "timestamp,price",
         "url": f"eq.{item_url}",
-        "order": "timestamp.desc",  # newest first
+        "order": "timestamp.desc",   # newest first
         "limit": str(n),
     }
-
     data, _ = http_get(f"{REST}/{PRICES_PRIMARY}", params, label="fetch_series:lastN:primary")
     df = pd.DataFrame(data)
-
     if df.empty:
         data, _ = http_get(f"{REST}/{PRICES_FALLBACK}", params, label="fetch_series:lastN:fallback")
         df = pd.DataFrame(data)
-
     if df.empty:
         return df
-
     ts = pd.to_datetime(df["timestamp"], utc=True, errors="coerce").dt.tz_convert("Asia/Beirut")
     df = df.assign(timestamp=ts).dropna(subset=["timestamp"])
     df = df.drop_duplicates(subset=["timestamp"], keep="last").sort_values("timestamp").reset_index(drop=True)
@@ -500,12 +488,10 @@ def select_slider_stateful(key, label, options, value_default=None, **kwargs):
 
 with st.sidebar:
     st.markdown("### Diagnostics")
-    st.toggle(
-        "Verbose network logs",
-        value=True,
-        help="Log each HTTP request/response meta",
-        key="t_verbose",
-    )
+
+    # Stateful, no hard default once key exists (prevents rerun loops)
+    st.session_state.setdefault("t_verbose", False)
+    st.toggle("Verbose network logs", key="t_verbose", help="Log each HTTP request/response meta")
 
     if st.button("Run connectivity test", key="btn_ping"):
         try:
@@ -542,12 +528,11 @@ with st.form("filters_form"):
     c1, c2, c3 = st.columns(3)
     with c1:
         chosen_brands = multiselect_stateful(
-    "w_brands",
-    "Brands",
-    options=brands,
-    default_default=None,
-    format_func=lambda s: s.strip() if isinstance(s, str) else s
-)
+            "w_brands", "Brands",
+            options=brands,
+            default_default=None,
+            format_func=lambda s: s.strip() if isinstance(s, str) else s
+        )
         category = selectbox_stateful("w_category", "Category", options=["(Any)"] + categories, index_default=0)
     with c2:
         hits_range = slider_stateful("w_hits", "Min hits", hmin, max(hmin, hmax), (hmin, max(hmin, hmax)))
@@ -661,7 +646,7 @@ for r in range(rows):
         row = df.iloc[i]
         with cols[c]:
             with st.container(border=True):
-                # ---------- Clickable full-width image (keeps rows even via aspect ratio) ----------
+                # --- Clickable full-width image (equal heights via CSS aspect ratio) ---
                 if row.get("image_link"):
                     link = row.get("url") or "#"
                     img = html_escape(row.get("image_link", ""))
@@ -672,11 +657,11 @@ for r in range(rows):
                         unsafe_allow_html=True,
                     )
 
-                # Brand & title with clamped height -> equalizes cards
+                # Brand & title (title clamped to 2 lines to stabilize height)
                 st.markdown(f'<div class="card-brand">{html_escape(row.get("brand",""))}</div>', unsafe_allow_html=True)
                 st.markdown(f'<div class="card-title">{html_escape(row.get("title",""))}</div>', unsafe_allow_html=True)
 
-                # Metrics (smaller, responsive)
+                # Metrics (compact, responsive)
                 m1, m2, m3 = st.columns(3)
                 with m1:
                     st.metric("Latest (AED)", f"{row.get('latest_price', 0):.2f}")
@@ -707,9 +692,3 @@ for r in range(rows):
 
 # Final: logs
 LOG.render()
-
-
-
-
-
-
