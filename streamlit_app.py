@@ -89,7 +89,7 @@ def boot_diag():
 st.set_page_config(page_title="UAE Men Shoes — Global Lows", layout="wide")
 boot_diag()
 
-# Global CSS: improved readability & spacing
+# Global CSS
 st.markdown("""
 <style>
 :root{
@@ -150,15 +150,16 @@ HDR = {
 }
 
 
-# ============================ Persistent state & query param helpers ============================
+# ============================ State & query params ============================
 
-# Hard defaults (ensure they exist even before hydration)
 st.session_state.setdefault("filters_applied", False)
 st.session_state.setdefault("page", 0)
-st.session_state.setdefault("w_ship_usd", 7.0)     # NEW: shipping default
-st.session_state.setdefault("w_margin_pct", 25.0)  # NEW: margin default
-st.session_state.setdefault("w_cashback_pct", 0.0) # NEW: cashback default
-st.session_state.setdefault("w_order_desc", True)  # keep Sort descending ON by default
+
+# Persisting defaults for costs & sort
+st.session_state.setdefault("w_ship_usd", 7.0)
+st.session_state.setdefault("w_margin_pct", 25.0)
+st.session_state.setdefault("w_cashback_pct", 0.0)
+st.session_state.setdefault("w_order_desc", True)
 
 def qp_get() -> dict:
     try:
@@ -255,13 +256,13 @@ def hydrate_from_qp(brands_opts, categories_opts, pmin, pmax, hmin, hmax):
             st.session_state["w_page_size"] = int(qp.get("ps","24"))
         except Exception:
             pass
-    # hydrate costs (only if not already set by defaults/user)
-    if "ship" in qp and ("w_ship_usd" not in st.session_state or st.session_state["w_ship_usd"] is None):
-        st.session_state["w_ship_usd"] = parse_float(qp.get("ship"), 7.0)
-    if "m" in qp and ("w_margin_pct" not in st.session_state or st.session_state["w_margin_pct"] is None):
-        st.session_state["w_margin_pct"] = parse_float(qp.get("m"), 25.0)
-    if "cb" in qp and ("w_cashback_pct" not in st.session_state or st.session_state["w_cashback_pct"] is None):
-        st.session_state["w_cashback_pct"] = parse_float(qp.get("cb"), 0.0)
+    # hydrate costs if not set
+    if "w_ship_usd" not in st.session_state or st.session_state["w_ship_usd"] is None:
+        st.session_state["w_ship_usd"] = parse_float(qp.get("ship", st.session_state["w_ship_usd"]), 7.0)
+    if "w_margin_pct" not in st.session_state or st.session_state["w_margin_pct"] is None:
+        st.session_state["w_margin_pct"] = parse_float(qp.get("m", st.session_state["w_margin_pct"]), 25.0)
+    if "w_cashback_pct" not in st.session_state or st.session_state["w_cashback_pct"] is None:
+        st.session_state["w_cashback_pct"] = parse_float(qp.get("cb", st.session_state["w_cashback_pct"]), 0.0)
 
     st.session_state["filters_applied"] = True
 
@@ -269,19 +270,13 @@ def hydrate_from_qp(brands_opts, categories_opts, pmin, pmax, hmin, hmax):
 # ============================ HTTP helper ============================
 
 def http_get(url: str, params: dict, label: str = "") -> tuple[list, str | None]:
-    t0 = time.perf_counter()
     try:
         r = requests.get(url, params=params, headers=HDR, timeout=60)
         if not r.ok:
             body_preview = r.text[:1000]
             st.error(f"Supabase REST error: {r.status_code}\n{body_preview}")
             st.stop()
-        try:
-            js = r.json()
-        except Exception:
-            st.error("Failed to decode JSON from REST response.")
-            st.stop()
-        return js, r.headers.get("content-range")
+        return r.json(), r.headers.get("content-range")
     except requests.RequestException as e:
         st.error(f"Network error: {e}")
         st.stop()
@@ -498,10 +493,7 @@ with st.form("filters_form"):
 
     submitted = st.form_submit_button("Apply Filters", use_container_width=True)
     if submitted:
-        # Explicitly persist the current form values to avoid any reset
-        st.session_state["w_ship_usd"] = float(ship_usd_in)
-        st.session_state["w_margin_pct"] = float(margin_pct_in)
-        st.session_state["w_cashback_pct"] = float(cashback_pct_in)
+        # DO NOT manually set st.session_state["w_*"] here; widgets already saved their values.
         st.session_state["filters_applied"] = True
         st.session_state["page"] = 0
         encode_filters_to_qp()
@@ -524,6 +516,10 @@ flt = {
 }
 
 # Costs (safe coalesce)
+def clamp01(x: float) -> float:
+    try: return max(0.0, min(1.0, float(x)))
+    except Exception: return 0.0
+
 ship_usd = float(st.session_state.get("w_ship_usd") or 0.0)
 margin_frac = clamp01((st.session_state.get("w_margin_pct") or 0.0) / 100.0)
 cashback_frac = clamp01((st.session_state.get("w_cashback_pct") or 0.0) / 100.0)
@@ -544,6 +540,35 @@ page = st.session_state.get("page", 0)
 page_size = st.session_state.get("w_page_size", 24)
 
 # Fetch
+def build_params(flt: dict, limit: int, offset: int) -> dict:
+    direction = "desc" if flt["order_desc"] else "asc"
+    p: dict[str, list | str] = {
+        "select": "*",
+        "has_higher": "eq.true",
+        "order": f"{flt['order_by']}.{direction}.nullslast,latest_price.asc,brand.asc",
+        "limit": str(limit),
+        "offset": str(offset),
+    }
+    if flt["brands"]:   p["brand"] = pg_in(flt["brands"])
+    if flt["category"]: p["category"] = f"eq.{flt['category']}"
+    lo, hi = flt["min_hits"];      p["min_hits"] = [f"gte.{lo}", f"lte.{hi}"]
+    plo, phi = flt["price_range"]; p["latest_price"] = [f"gte.{plo}", f"lte.{phi}"]
+    for col, (lo_pct, hi_pct) in {
+        "drop_pct_vs_prev": flt["drop_prev"],
+        "delta_vs_30d_pct": flt["drop_30"],
+        "delta_vs_90d_pct": flt["drop_90"],
+    }.items():
+        p[col] = [f"gte.{lo_pct/100.0}", f"lte.{hi_pct/100.0}"]
+    return p
+
+@st.cache_data(ttl=300)
+def fetch_items(flt: dict, page: int, page_size: int) -> tuple[pd.DataFrame, int | None]:
+    params = build_params(flt, page_size, page * page_size)
+    data, cr = http_get(f"{REST}/{MV}", params, label="fetch_items")
+    total = int(cr.split("/")[-1]) if cr and "/" in cr else None
+    df = pd.DataFrame(data)
+    return df, total
+
 df, total = fetch_items(flt, page, page_size)
 if df.empty:
     st.warning("No items match your filters."); LOG.render(); st.stop()
@@ -583,7 +608,7 @@ for r in range(rows):
                 usd_base = latest_aed * AED_TO_USD
                 landed_usd = (usd_base * (1.0 - cashback_frac) * (1.0 + margin_frac)) + ship_usd
 
-                # Two-column compact metrics for readability
+                # Two-column compact metrics
                 left_col, right_col = st.columns(2)
                 with left_col:
                     st.metric("Latest (AED)", f"{latest_aed:.2f}")
