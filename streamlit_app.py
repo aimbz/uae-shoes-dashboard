@@ -86,7 +86,7 @@ def boot_diag():
 
 # ============================ App config / Secrets ============================
 
-st.set_page_config(page_title="UAE Men Shoes — Global Lows", layout="wide")
+st.set_page_config(page_title="Nam Shoes Lows", layout="wide")
 boot_diag()
 
 # Global CSS
@@ -139,9 +139,17 @@ if not SUPABASE_URL or not SUPABASE_ANON_KEY:
     st.stop()
 
 REST = f"{SUPABASE_URL}/rest/v1"
-MV = "nam_uae_men_shoes_at_global_low"
-PRICES_PRIMARY = "nam-uae-men-shoes-prices"
-PRICES_FALLBACK = "prices"
+
+# ⬇️ NEW: use the global MV
+MV = "nam_global_shoes_at_global_low"
+
+# ⬇️ NEW: price-series lookup order for the chart
+PRICES_TABLES = [
+    "nam-uae-men-shoes-prices",
+    "nam-uae-women-shoes-prices",
+    "nam-ksa-men-shoes-prices",
+    "prices",  # optional fallback if you still maintain it
+]
 
 HDR = {
     "apikey": SUPABASE_ANON_KEY,
@@ -371,16 +379,35 @@ MAX_POINTS = 200
 
 @st.cache_data(ttl=300, max_entries=512)
 def fetch_series(item_url: str, n: int = MAX_POINTS) -> pd.DataFrame:
-    params = {"select": "timestamp,price", "url": f"eq.{item_url}", "order": "timestamp.desc", "limit": str(n)}
-    data, _ = http_get(f"{REST}/{PRICES_PRIMARY}", params, label="fetch_series:lastN:primary")
-    df = pd.DataFrame(data)
-    if df.empty:
-        data, _ = http_get(f"{REST}/{PRICES_FALLBACK}", params, label="fetch_series:lastN:fallback")
+    """
+    Fetch the last N (timestamp, price) points for a URL by searching the
+    regional prices tables in order, falling back to 'prices' if present.
+    """
+    params_base = {
+        "select": "timestamp,price",
+        "url": f"eq.{item_url}",
+        "order": "timestamp.desc",
+        "limit": str(n),
+    }
+
+    df = pd.DataFrame()
+    for table in PRICES_TABLES:
+        data, _ = http_get(f"{REST}/{table}", params_base, label=f"fetch_series:{table}")
         df = pd.DataFrame(data)
-    if df.empty: return df
+        if not df.empty:
+            break
+
+    if df.empty:
+        return df  # no series anywhere
+
     ts = pd.to_datetime(df["timestamp"], utc=True, errors="coerce").dt.tz_convert("Asia/Beirut")
-    df = df.assign(timestamp=ts).dropna(subset=["timestamp"])
-    df = df.drop_duplicates(subset=["timestamp"], keep="last").sort_values("timestamp").reset_index(drop=True)
+    df = (
+        df.assign(timestamp=ts)
+          .dropna(subset=["timestamp"])
+          .drop_duplicates(subset=["timestamp"], keep="last")
+          .sort_values("timestamp")
+          .reset_index(drop=True)
+    )
     return df
 
 
@@ -638,6 +665,3 @@ for r in range(rows):
 
 # Logs (collapsed)
 LOG.render()
-
-
-
