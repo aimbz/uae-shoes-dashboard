@@ -25,35 +25,22 @@ import streamlit as st
 class DiagLog:
     def __init__(self, name="logs"):
         self.name = name
-        if "_diag_log" not in st.session_state:
-            st.session_state["_diag_log"] = []
-        self.buf = st.session_state["_diag_log"]
+        self._items: list[dict] = []
 
-    def log(self, msg, data=None):
-        ts = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M:%S.%f %Z")
-        entry = {"ts": ts, "msg": str(msg)}
-        if data is not None:
-            try:
-                json.dumps(data)
-                entry["data"] = data
-            except Exception:
-                entry["data"] = str(data)
-        self.buf.append(entry)
-
-    def clear(self):
-        st.session_state["_diag_log"] = []
-        self.buf = st.session_state["_diag_log"]
+    def log(self, tag: str, data: dict | None = None):
+        self._items.append({"ts": datetime.now(timezone.utc).isoformat(), "tag": tag, "data": data or {}})
 
     def render(self):
-        with st.expander("🧰 Logs (diagnostics)", expanded=False):
-            st.caption("Detailed boot/runtime logs (safe: no secrets)")
-            for e in self.buf[-120:]:
-                st.write(f"[{e['ts']}] {e['msg']}")
-                if "data" in e:
-                    try:
-                        st.code(json.dumps(e["data"], indent=2))
-                    except Exception:
-                        st.code(str(e["data"]))
+        if not self._items:
+            st.caption("No logs.")
+            return
+        st.write(f"**Diagnostics ({len(self._items)})**")
+        for e in self._items[-200:]:
+            with st.expander(f"[{e['ts']}] {e['tag']}", expanded=False):
+                try:
+                    st.code(json.dumps(e["data"], indent=2))
+                except Exception:
+                    st.code(str(e["data"]))
 
 
 LOG = DiagLog()
@@ -61,48 +48,56 @@ LOG = DiagLog()
 def safe_pkg_version(mod_name):
     try:
         mod = __import__(mod_name)
-        return getattr(mod, "__version__", "unknown")
+        v = getattr(mod, "__version__", "unknown")
     except Exception:
-        return "missing"
+        v = "n/a"
+    return v
 
 def boot_diag():
-    LOG.clear()
-    LOG.log("Boot: starting app")
-    LOG.log(
-        "Environment",
-        {
-            "python": sys.version,
-            "platform": platform.platform(),
-            "executable": sys.executable,
-            "cwd": os.getcwd(),
-            "timezone": time.tzname,
-            "streamlit": safe_pkg_version("streamlit"),
-            "pandas": safe_pkg_version("pandas"),
-            "requests": safe_pkg_version("requests"),
-            "plotly": safe_pkg_version("plotly"),
-        },
+    st.caption(
+        f"Py {platform.python_version()} • "
+        f"streamlit {safe_pkg_version('streamlit')} • "
+        f"pandas {safe_pkg_version('pandas')} • "
+        f"plotly {safe_pkg_version('plotly')} • "
+        f"requests {safe_pkg_version('requests')}"
     )
 
 
-# ============================ App config / Secrets ============================
+# ============================ CSS ============================
 
-st.set_page_config(page_title="Nam Shoes Lows", layout="wide")
-boot_diag()
-
-# Global CSS
-st.markdown("""
-<style>
+st.markdown(
+    """
+    <style>
 :root{
-  --brand-size: clamp(1.0rem, 1.2vw, 1.1rem);
-  --title-size: clamp(0.95rem, 1.1vw, 1.02rem);
-  --metric-value: clamp(1.0rem, 1.5vw, 1.3rem);
-  --metric-label: clamp(0.78rem, 1.0vw, 0.9rem);
+  --card-gap: .9rem;
+  --title-size: clamp(13px, 1.2vw + .3rem, 16px);
+  --brand-size: clamp(11px, 1vw + .2rem, 13px);
 }
-.block-container { padding-top: 0.75rem; }
-div[data-testid="stMetric"] div[data-testid="stMetricValue"] { font-size: var(--metric-value); line-height: 1.15; }
-div[data-testid="stMetric"] div[data-testid="stMetricLabel"] { font-size: var(--metric-label); color: #6b7280; }
-.card-brand{ font-weight: 700; font-size: var(--brand-size); margin: .35rem 0 .15rem; color:#111827; }
-.card-title{
+.card-grid{
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: var(--card-gap);
+}
+@media (max-width: 1400px){ .card-grid{ grid-template-columns: repeat(3, 1fr); } }
+@media (max-width: 980px){ .card-grid{ grid-template-columns: repeat(2, 1fr); } }
+@media (max-width: 620px){ .card-grid{ grid-template-columns: 1fr; } }
+
+.card{
+  border: 1px solid #e5e7eb;
+  border-radius: 14px;
+  padding: .8rem .9rem;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: #fff;
+}
+.card a{ text-decoration: none; }
+.card .brand{
+  font-size: var(--brand-size);
+  color: #374151;
+  margin-bottom: .15rem;
+}
+.card .title{
   font-size: var(--title-size);
   color: #1f2937;
   display: -webkit-box;
@@ -125,9 +120,16 @@ div[data-testid="stMetric"] div[data-testid="stMetricLabel"] { font-size: var(--
 .small-cap { color:#6b7280; font-size: .85rem; }
 .section-gap { margin-top:.35rem; }
 button[aria-expanded="false"] p { margin-bottom: 0; }
-div[data-testid="stVerticalBlock"] > div:has(> div[data-testid="stVerticalBlock"]) { height: 100%; }
-</style>
-""", unsafe_allow_html=True)
+div[data-testid="stExpander"] div[role="button"] p { font-size: .9rem !important; }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
+
+
+# ============================ Secrets & REST ============================
+
+st.title("UAE Men Shoes — Global Lows")
 
 SUPABASE_URL = (st.secrets.get("SUPABASE_URL") or "").rstrip("/")
 SUPABASE_ANON_KEY = st.secrets.get("SUPABASE_ANON_KEY")
@@ -140,10 +142,14 @@ if not SUPABASE_URL or not SUPABASE_ANON_KEY:
 
 REST = f"{SUPABASE_URL}/rest/v1"
 
-# ⬇️ NEW: use the global MV
-MV = "nam_global_shoes_at_global_low"
+# ⬇️  public anon key only; ensure RLS policies allow read for anon
+HDR = {
+    "apikey": SUPABASE_ANON_KEY,
+    "Authorization": f"Bearer {SUPABASE_ANON_KEY}",
+    "Prefer": "count=exact",
+}
 
-# ⬇️ NEW: price-series lookup order for the chart
+MV = "nam_global_shoes_at_global_low"
 PRICES_TABLES = [
     "nam-uae-men-shoes-prices",
     "nam-uae-women-shoes-prices",
@@ -151,114 +157,67 @@ PRICES_TABLES = [
     "prices",  # optional fallback if you still maintain it
 ]
 
-HDR = {
-    "apikey": SUPABASE_ANON_KEY,
-    "Authorization": f"Bearer {SUPABASE_ANON_KEY}",
-    "Prefer": "count=exact",
-}
 
-
-# ============================ State & query params ============================
-
-st.session_state.setdefault("filters_applied", False)
-st.session_state.setdefault("page", 0)
-
-# Persisting defaults for costs & sort
-st.session_state.setdefault("w_ship_usd", 7.0)
-st.session_state.setdefault("w_margin_pct", 25.0)
-st.session_state.setdefault("w_cashback_pct", 0.0)
-st.session_state.setdefault("w_order_desc", True)
+# ============================ State & query params ======================
 
 def qp_get() -> dict:
-    try:
-        return {k: v for k, v in st.query_params.items()}
-    except Exception:
-        raw = st.experimental_get_query_params()
-        return {k: (v[0] if isinstance(v, list) and v else "") for k, v in raw.items()}
+    return st.query_params.to_dict()
 
-def qp_set(new_params: dict):
-    qp = {k: (",".join(v) if isinstance(v, list) else str(v)) for k, v in new_params.items() if v is not None}
-    try:
-        st.query_params.update(qp)
-    except Exception:
-        st.experimental_set_query_params(**qp)
+def qp_set(**kwargs):
+    # merge into current
+    qp = {**st.query_params, **{k: v for k, v in kwargs.items() if v is not None}}
+    st.query_params.clear()
+    st.query_params.update(qp)
 
-def qp_clear():
-    try:
-        st.query_params.clear()
-    except Exception:
-        st.experimental_set_query_params()
+def qp_clear(keys: list[str]):
+    qp = dict(st.query_params)
+    for k in keys:
+        qp.pop(k, None)
+    st.query_params.clear()
+    st.query_params.update(qp)
 
-def encode_filters_to_qp():
-    brands = st.session_state.get("w_brands", [])
-    category = st.session_state.get("w_category")
-    category_param = "" if (not category or category == "(Any)") else category
-    hits = st.session_state.get("w_hits")
-    price = st.session_state.get("w_price")
-    order = st.session_state.get("w_order_by") or ""
-    desc = 1 if st.session_state.get("w_order_desc", True) else 0
-    page = st.session_state.get("page", 0)
-    ps = st.session_state.get("w_page_size", 24)
-    ship = st.session_state.get("w_ship_usd", 7)
-    margin = st.session_state.get("w_margin_pct", 25)
-    cashback = st.session_state.get("w_cashback_pct", 0)
-    qp_set({
-        "applied": "1",
-        "brands": ",".join(brands) if brands else "",
-        "category": category_param,
-        "hits": f"{hits[0]}-{hits[1]}" if hits else "",
-        "price": f"{price[0]}-{price[1]}" if price else "",
-        "order": order,
-        "desc": str(desc),
-        "page": str(page),
-        "ps": str(ps),
-        "ship": str(ship),
-        "m": str(margin),
-        "cb": str(cashback),
-    })
+def encode_filters_to_qp(flt: dict):
+    qp_set(
+        b=",".join(flt["brands"]) if flt["brands"] else None,
+        c=flt["category"] or None,
+        p=f"{int(flt['price_range'][0])}-{int(flt['price_range'][1])}",
+        h=f"{int(flt['min_hits'][0])}-{int(flt['min_hits'][1])}",
+        d=f"{flt['drop_prev'][0]}-{flt['drop_prev'][1]}",
+        d30=f"{flt['drop_30'][0]}-{flt['drop_30'][1]}",
+        d90=f"{flt['drop_90'][0]}-{flt['drop_90'][1]}",
+        ob=flt["order_by"],
+        od="1" if flt["order_desc"] else "0",
+        ps=str(flt["page_size"]),
+        ship=str(flt["ship_usd"]),
+        m=str(flt["margin_pct"]),
+        cb=str(flt["cashback_pct"]),
+        page=str(flt["page"]),
+    )
 
-def parse_range(s: str, cast=float):
+def parse_range(s: str | None, cast=int, default=(0, 0)):
+    if not s: return default
     try:
         lo, hi = s.split("-", 1)
-        return (cast(lo), cast(hi))
+        return cast(lo), cast(hi)
     except Exception:
-        return None
+        return default
 
-def parse_float(s, default=0.0):
+def parse_float(s, default):
     try:
         return float(s)
     except Exception:
         return default
 
-def hydrate_from_qp(brands_opts, categories_opts, pmin, pmax, hmin, hmax):
+def hydrate_from_qp():
     qp = qp_get()
-    if not qp or (qp.get("applied") != "1" and not any(qp.get(k) for k in ("brands","category","order","price","hits","ship","m","cb"))):
-        return
-    if "w_brands" not in st.session_state and qp.get("brands"):
-        picked = [b for b in qp["brands"].split(",") if b]
-        st.session_state["w_brands"] = [b for b in picked if b in brands_opts]
-    if "w_category" not in st.session_state:
-        cat = qp.get("category", "")
-        st.session_state["w_category"] = cat if cat in categories_opts else "(Any)"
-    if "w_hits" not in st.session_state:
-        r = parse_range(qp.get("hits",""), int)
-        if r:
-            lo, hi = r
-            st.session_state["w_hits"] = (max(hmin, lo), min(hmax, hi))
-    if "w_price" not in st.session_state:
-        r = parse_range(qp.get("price",""), float)
-        if r:
-            lo, hi = r
-            st.session_state["w_price"] = (max(pmin, lo), min(pmax, hi))
-    if "w_order_by" not in st.session_state and qp.get("order"):
-        st.session_state["w_order_by"] = qp["order"]
-    if "w_order_desc" not in st.session_state and "desc" in qp:
-        st.session_state["w_order_desc"] = (str(qp["desc"]) == "1")
-    if "page" not in st.session_state:
-        try:
-            st.session_state["page"] = max(0, int(qp.get("page","0")))
-        except Exception:
-            pass
+    # basic filters
+    if "w_order_by" not in st.session_state:
+        st.session_state["w_order_by"] = qp.get("ob", "delta_vs_30d_pct")
+    if "w_order_desc" not in st.session_state:
+        st.session_state["w_order_desc"] = qp.get("od", "1") == "1"
+    if "w_page" not in st.session_state:
+        try: st.session_state["w_page"] = int(qp.get("page","0"))
+        except Exception: pass
     if "w_page_size" not in st.session_state:
         try:
             st.session_state["w_page_size"] = int(qp.get("ps","24"))
@@ -275,28 +234,31 @@ def hydrate_from_qp(brands_opts, categories_opts, pmin, pmax, hmin, hmax):
     st.session_state["filters_applied"] = True
 
 
-# ============================ HTTP helper ============================
+# ============================ HTTP ============================
 
 def http_get(url: str, params: dict, label: str = "") -> tuple[list, str | None]:
+    """HTTP GET with soft-fail: logs + warning instead of st.stop() on errors."""
     try:
-        r = requests.get(url, params=params, headers=HDR, timeout=60)
-        if not r.ok:
-            body_preview = r.text[:1000]
-            st.error(f"Supabase REST error: {r.status_code}\n{body_preview}")
-            st.stop()
+        r = requests.get(url, params=params, headers=HDR, timeout=30)
+        r.raise_for_status()
         return r.json(), r.headers.get("content-range")
     except requests.RequestException as e:
-        st.error(f"Network error: {e}")
-        st.stop()
+        try:
+            LOG.log("HTTP error", {"label": label, "url": url, "params": params, "error": str(e)})
+        except Exception:
+            pass
+        st.warning(f"{label}: temporary data error. Check logs.")
+        return [], None
 
 
 # ============================ Data loaders (cached) ============================
 
 @st.cache_data(ttl=300)
-def _scan_distinct_values_from_mv(col: str, page_size: int = 1000) -> list[str]:
+def _scan_distinct_values_from_mv(col: str, page_size: int = 300, max_rows: int = 3000) -> list[str]:
     values: set[str] = set()
     offset = 0
     total = None
+    seen = 0
     while True:
         params = {"select": col, col: "not.is.null", "order": f"{col}.asc", "limit": str(page_size), "offset": str(offset)}
         chunk, content_range = http_get(f"{REST}/{MV}", params, label=f"scan:{col}")
@@ -308,13 +270,14 @@ def _scan_distinct_values_from_mv(col: str, page_size: int = 1000) -> list[str]:
             v = r.get(col)
             if v is not None: values.add(str(v))
         offset += len(chunk)
-        if total is not None and offset >= total: break
+        seen += len(chunk)
+        if (total is not None and offset >= total) or seen >= max_rows: break
     return sorted(values, key=lambda s: s.lower())
 
 @st.cache_data(ttl=300)
 def load_options():
-    brands = _scan_distinct_values_from_mv("brand", page_size=1000)
-    categories = _scan_distinct_values_from_mv("category", page_size=1000)
+    brands = _scan_distinct_values_from_mv("brand", page_size=300, max_rows=3000)
+    categories = _scan_distinct_values_from_mv("category", page_size=300, max_rows=3000)
     def minmax(col, cast=float):
         lo_rows, _ = http_get(f"{REST}/{MV}", {"select": col, "order": f"{col}.asc", "limit": "1"}, label=f"min_{col}")
         hi_rows, _ = http_get(f"{REST}/{MV}", {"select": col, "order": f"{col}.desc", "limit": "1"}, label=f"max_{col}")
@@ -328,20 +291,18 @@ def load_options():
 
 # ============================ Utilities ============================
 
-AED_TO_USD = 0.282
-
 def pg_in(values: list[str]) -> str:
-    esc = [v.replace('"', '""') for v in values]
-    return 'in.(' + ",".join([f'"{e}"' for e in esc]) + ')'
+    # PostgREST "in.(a,b,c)" format; ensure URL-safe (quotes not needed for basic strings)
+    esc = ",".join([str(v).replace(",", " ") for v in values if v])
+    return f"in.({esc})"
 
-def pct_fmt(x) -> str:
-    try: return f"{float(x)*100:.1f}%"
-    except Exception: return "—"
+def pct_fmt(x):
+    try:
+        return f"{x*100:.1f}%"
+    except Exception:
+        return "—"
 
-def clamp01(x: float) -> float:
-    try: return max(0.0, min(1.0, float(x)))
-    except Exception: return 0.0
-
+def clamp01(x): return max(0.0, min(1.0, float(x)))
 
 def build_params(flt: dict, limit: int, offset: int) -> dict:
     direction = "desc" if flt["order_desc"] else "asc"
@@ -398,17 +359,18 @@ def fetch_series(item_url: str, n: int = MAX_POINTS) -> pd.DataFrame:
             break
 
     if df.empty:
-        return df  # no series anywhere
+        return df
 
-    ts = pd.to_datetime(df["timestamp"], utc=True, errors="coerce").dt.tz_convert("Asia/Beirut")
-    df = (
-        df.assign(timestamp=ts)
+    # normalize tz to Beirut for plotting
+    if "timestamp" in df.columns:
+        df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True).dt.tz_convert("Asia/Beirut")
+    return (
+        df[["timestamp", "price"]]
           .dropna(subset=["timestamp"])
           .drop_duplicates(subset=["timestamp"], keep="last")
           .sort_values("timestamp")
           .reset_index(drop=True)
     )
-    return df
 
 
 # ============================ Sidebar ============================
@@ -423,25 +385,17 @@ with st.sidebar:
             LOG.log("Ping MV ok", {"content_range": cr, "sample_rows": len(sample)})
         except Exception as e:
             LOG.log("Ping MV failed", {"error": str(e)})
-            st.error(f"Ping failed: {e}")
-    st.markdown("---")
-    if st.button("Reset filters", key="btn_reset"):
-        for k in list(st.session_state.keys()):
-            if k.startswith("w_"):
-                del st.session_state[k]
-        st.session_state["filters_applied"] = False
-        st.session_state["page"] = 0
-        qp_clear()
-        st.rerun()
+            st.error("Ping failed.")
+    with st.expander("Logs", expanded=False):
+        LOG.render()
+
+boot_diag()
 
 
-# ============================ UI ============================
-
-st.title("UAE Men Shoes — Current Global Lows")
-st.caption("Data live from Supabase REST API (materialized view + time series).")
+# ============================ Filters ============================
 
 brands, categories, pmin, pmax, hmin, hmax = load_options()
-hydrate_from_qp(brands, categories, pmin, pmax, hmin, hmax)
+hydrate_from_qp()
 
 def number_stateful(key, label, value_default, **kwargs):
     if key in st.session_state:
@@ -461,11 +415,11 @@ def selectbox_stateful(key, label, options, index_default=0, **kwargs):
     else:
         return st.selectbox(label, options=options, index=index_default, key=key, **kwargs)
 
-def multiselect_stateful(key, label, options, default_default=None, **kwargs):
+def multiselect_stateful(key, label, options, default=None, **kwargs):
     if key in st.session_state:
         return st.multiselect(label, options=options, key=key, **kwargs)
     else:
-        return st.multiselect(label, options=options, default=(default_default or []), key=key, **kwargs)
+        return st.multiselect(label, options=options, default=default or [], key=key, **kwargs)
 
 def toggle_stateful(key, label, value_default=False, **kwargs):
     if key in st.session_state:
@@ -473,38 +427,31 @@ def toggle_stateful(key, label, value_default=False, **kwargs):
     else:
         return st.toggle(label, value=value_default, key=key, **kwargs)
 
-def select_slider_stateful(key, label, options, value_default=None, **kwargs):
+def select_slider_stateful(key, label, options, value_default, **kwargs):
     if key in st.session_state:
         return st.select_slider(label, options=options, key=key, **kwargs)
     else:
         return st.select_slider(label, options=options, value=value_default, key=key, **kwargs)
 
-with st.form("filters_form"):
-    st.subheader("Filters (choose, then Apply)")
 
-    # Costs row (persists)
-    cc1, cc2, cc3 = st.columns(3)
-    with cc1:
-        ship_usd_in = number_stateful("w_ship_usd", "Shipping (USD)", 7.0, min_value=0.0, step=0.5)
-    with cc2:
-        margin_pct_in = number_stateful("w_margin_pct", "Margin (%)", 25.0, min_value=0.0, step=1.0)
-    with cc3:
-        cashback_pct_in = number_stateful("w_cashback_pct", "Cashback (%)", 0.0, min_value=0.0, step=1.0)
-
-    st.markdown("---")
+with st.form("filters"):
+    st.subheader("Filters")
 
     c1, c2, c3 = st.columns(3)
     with c1:
-        chosen_brands = multiselect_stateful("w_brands", "Brands", options=brands, default_default=None)
-        category = selectbox_stateful("w_category", "Category", options=["(Any)"] + categories, index_default=0)
+        sel_brands = multiselect_stateful("w_brands", "Brands", brands, default=brands[:12])
     with c2:
-        hits_range = slider_stateful("w_hits", "Min hits", hmin, max(hmin, hmax), (hmin, max(hmin, hmax)))
-        price_range = slider_stateful("w_price", "Price range (AED)", float(pmin), float(pmax or max(pmin, pmin + 1)),
-                                      (float(pmin), float(pmax or max(pmin, pmin + 1))))
+        sel_cat = selectbox_stateful("w_category", "Category", [""] + categories, index_default=0)
     with c3:
-        drop_prev = slider_stateful("w_drop_prev", "Drop vs previous (%)", -100, 100, (-100, 100))
+        price_range = slider_stateful("w_price_range", "Price (AED)", int(pmin), int(pmax), (int(pmin), int(pmax)))
+
+    c4, c5, c6 = st.columns(3)
+    with c4:
+        min_hits = slider_stateful("w_min_hits", "Min Hits", int(hmin), max(100, int(hmax)), (int(hmin), int(hmax)))
+    with c5:
+        drop_prev = slider_stateful("w_drop_prev", "Drop vs prev (%)", -100, 100, (-100, 100))
+    with c6:
         drop_30 = slider_stateful("w_drop_30", "Drop vs 30-day avg (%)", -100, 100, (-100, 100))
-        drop_90 = slider_stateful("w_drop_90", "Drop vs 90-day avg (%)", -100, 100, (-100, 100))
 
     st.markdown("---")
     cA, cB, cC = st.columns(3)
@@ -518,150 +465,149 @@ with st.form("filters_form"):
     with cC:
         page_size = select_slider_stateful("w_page_size", "Page size", options=[12, 24, 48, 96], value_default=24)
 
-    submitted = st.form_submit_button("Apply Filters", use_container_width=True)
-    if submitted:
-        # DO NOT manually set st.session_state["w_*"] here; widgets already saved their values.
-        st.session_state["filters_applied"] = True
-        st.session_state["page"] = 0
-        encode_filters_to_qp()
+    cX, cY, cZ = st.columns(3)
+    with cX:
+        ship_usd = number_stateful("w_ship_usd", "Shipping USD", 7.0, step=0.5)
+    with cY:
+        margin_pct = number_stateful("w_margin_pct", "Margin %", 25.0, step=1.0)
+    with cZ:
+        cashback_pct = number_stateful("w_cashback_pct", "Cashback %", 0.0, step=0.5)
 
-if not st.session_state.get("filters_applied", False):
-    st.info("↑ Set your filters, then click **Apply Filters**.")
-    LOG.render()
-    st.stop()
+    apply = st.form_submit_button("Apply", use_container_width=True)
+    if apply:
+        st.session_state["w_page"] = 0
+        encode_filters_to_qp({
+            "brands": sel_brands,
+            "category": sel_cat,
+            "price_range": price_range,
+            "min_hits": min_hits,
+            "drop_prev": drop_prev,
+            "drop_30": drop_30,
+            "drop_90": (-100, 100),
+            "order_by": order_by,
+            "order_desc": order_desc,
+            "page_size": page_size,
+            "ship_usd": ship_usd,
+            "margin_pct": margin_pct,
+            "cashback_pct": cashback_pct,
+            "page": 0,
+        })
+        st.rerun()
+
 
 flt = {
     "brands": st.session_state.get("w_brands", []),
-    "category": None if st.session_state.get("w_category") in (None, "(Any)") else st.session_state.get("w_category"),
-    "min_hits": st.session_state.get("w_hits"),
-    "price_range": st.session_state.get("w_price"),
-    "drop_prev": st.session_state.get("w_drop_prev"),
-    "drop_30": st.session_state.get("w_drop_30"),
-    "drop_90": st.session_state.get("w_drop_90"),
-    "order_by": st.session_state.get("w_order_by"),
+    "category": st.session_state.get("w_category", ""),
+    "price_range": st.session_state.get("w_price_range", (0, 0)),
+    "min_hits": st.session_state.get("w_min_hits", (0, 0)),
+    "drop_prev": st.session_state.get("w_drop_prev", (-100, 100)),
+    "drop_30": st.session_state.get("w_drop_30", (-100, 100)),
+    "drop_90": (-100, 100),
+    "order_by": st.session_state.get("w_order_by", "delta_vs_30d_pct"),
     "order_desc": st.session_state.get("w_order_desc", True),
+    "page_size": st.session_state.get("w_page_size", 24),
+    "page": st.session_state.get("w_page", 0),
+    "ship_usd": st.session_state.get("w_ship_usd", 7.0),
+    "margin_pct": st.session_state.get("w_margin_pct", 25.0),
+    "cashback_pct": st.session_state.get("w_cashback_pct", 0.0),
 }
 
-# Costs (safe coalesce)
-def clamp01(x: float) -> float:
-    try: return max(0.0, min(1.0, float(x)))
-    except Exception: return 0.0
-
-cashback_frac = clamp01((st.session_state.get("w_cashback_pct") or 0.0) / 100.0)
-margin_frac   = clamp01((st.session_state.get("w_margin_pct")   or 0.0) / 100.0)
-ship_usd      = float(st.session_state.get("w_ship_usd")        or 0.0)
-
-# ============================ Results ============================
-
-# Pagination
-page = st.session_state.get("page", 0)
-prev_col, _, next_col = st.columns([1, 6, 1])
-with prev_col:
-    if st.button("⟵ Prev", disabled=(page <= 0), key="btn_prev"):
-        st.session_state["page"] = max(0, page - 1); encode_filters_to_qp(); st.rerun()
-with next_col:
-    if st.button("Next ⟶", key="btn_next"):
-        st.session_state["page"] = page + 1; encode_filters_to_qp(); st.rerun()
-
-page = st.session_state.get("page", 0)
-page_size = st.session_state.get("w_page_size", 24)
-
-# Fetch
-def build_params(flt: dict, limit: int, offset: int) -> dict:
-    direction = "desc" if flt["order_desc"] else "asc"
-    p: dict[str, list | str] = {
-        "select": "*",
-        "has_higher": "eq.true",
-        "order": f"{flt['order_by']}.{direction}.nullslast,latest_price.asc,brand.asc",
-        "limit": str(limit),
-        "offset": str(offset),
-    }
-    if flt["brands"]:   p["brand"] = pg_in(flt["brands"])
-    if flt["category"]: p["category"] = f"eq.{flt['category']}"
-    lo, hi = flt["min_hits"];      p["min_hits"] = [f"gte.{lo}", f"lte.{hi}"]
-    plo, phi = flt["price_range"]; p["latest_price"] = [f"gte.{plo}", f"lte.{phi}"]
-    for col, (lo_pct, hi_pct) in {
-        "drop_pct_vs_prev": flt["drop_prev"],
-        "delta_vs_30d_pct": flt["drop_30"],
-        "delta_vs_90d_pct": flt["drop_90"],
-    }.items():
-        p[col] = [f"gte.{lo_pct/100.0}", f"lte.{hi_pct/100.0}"]
-    return p
-
-@st.cache_data(ttl=300)
-def fetch_items(flt: dict, page: int, page_size: int) -> tuple[pd.DataFrame, int | None]:
-    params = build_params(flt, page_size, page * page_size)
-    data, cr = http_get(f"{REST}/{MV}", params, label="fetch_items")
-    total = int(cr.split("/")[-1]) if cr and "/" in cr else None
-    df = pd.DataFrame(data)
-    return df, total
-
-df, total = fetch_items(flt, page, page_size)
-if df.empty:
-    st.warning("No items match your filters."); LOG.render(); st.stop()
-
-st.caption(f"Matches: {total if total is not None else '—'}  •  Page {page + 1}")
-
-# ============================ Cards grid ============================
-
-def html_escape(s: str) -> str:
-    return (str(s).replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
-                 .replace('"',"&quot;").replace("'","&#39;"))
-
-ncols = 4
-rows = math.ceil(len(df) / ncols)
-
-for r in range(rows):
-    cols = st.columns(ncols, gap="large")
-    for c in range(ncols):
-        i = r * ncols + c
-        if i >= len(df): break
-        row = df.iloc[i]
-        with cols[c]:
-            with st.container(border=True):
-                # Image clickable
-                if row.get("image_link"):
-                    link = row.get("url") or "#"
-                    img = html_escape(row.get("image_link", ""))
-                    alt = html_escape(row.get("title", "") or row.get("brand","") or "product")
-                    st.markdown(f'<a href="{link}" target="_blank" rel="noopener">'
-                                f'<img class="card-thumb" src="{img}" alt="{alt}"/></a>',
-                                unsafe_allow_html=True)
-
-                st.markdown(f'<div class="card-brand">{html_escape(row.get("brand",""))}</div>', unsafe_allow_html=True)
-                st.markdown(f'<div class="card-title">{html_escape(row.get("title",""))}</div>', unsafe_allow_html=True)
-
-                latest_aed = float(row.get("latest_price") or 0.0)
-
-                # USD = Price * 0.282 * (1 - Cashback) + Shipping
-                usd = (latest_aed * AED_TO_USD * (1.0 - cashback_frac)) + ship_usd
-
-                # Landed = USD * (1 + Margin)
-                landed_usd = usd * (1.0 + margin_frac)
-
-                left_col, right_col = st.columns(2)
-                with left_col:
-                    st.metric("Latest (AED)", f"{latest_aed:.2f}")
-                    st.markdown(f'<div class="usd-red">≈ ${usd:,.2f} USD</div>', unsafe_allow_html=True)
-                    st.markdown(f'<div class="usd-landed">Landed: ${landed_usd:,.2f}</div>', unsafe_allow_html=True)
+st.caption(f"Page {flt['page']+1} • Page size {flt['page_size']}")
 
 
-                with right_col:
-                    st.metric("Drop vs prev", pct_fmt(row.get("drop_pct_vs_prev")))
-                    st.markdown(f'<div class="small-cap section-gap">30d Δ: {pct_fmt(row.get("delta_vs_30d_pct"))}</div>', unsafe_allow_html=True)
-                    st.markdown(f'<div class="small-cap">90d Δ: {pct_fmt(row.get("delta_vs_90d_pct"))}</div>', unsafe_allow_html=True)
-                    st.markdown(f'<div class="small-cap">2nd-lowest gap: {pct_fmt(row.get("gap_to_second_lowest_pct"))}</div>', unsafe_allow_html=True)
+# ============================ Fetch & Render ============================
 
-                with st.expander("📈 Price History (AED)", expanded=False):
-                    ts = fetch_series(row["url"], n=MAX_POINTS)
-                    if ts.empty:
-                        st.info("No time-series data.")
-                    else:
-                        fig = go.Figure()
-                        fig.add_trace(go.Scatter(x=ts["timestamp"], y=ts["price"], mode="lines+markers", name="Price"))
-                        fig.update_layout(xaxis_title="Date (Asia/Beirut)", yaxis_title="AED",
-                                          margin=dict(l=10, r=10, t=30, b=10), height=280)
-                        st.plotly_chart(fig, use_container_width=True)
+df, total = fetch_items(flt, page=flt["page"], page_size=flt["page_size"])
+count = len(df)
 
-# Logs (collapsed)
-LOG.render()
+if count == 0:
+    st.info("No items match the current filters.")
+else:
+    st.write(f"**{total or count} items** (showing {count})")
+
+    # Grid
+    st.markdown('<div class="card-grid">', unsafe_allow_html=True)
+
+    for _, row in df.iterrows():
+        # card start
+        st.markdown('<div class="card">', unsafe_allow_html=True)
+
+        # image + link
+        link = row.get("link") or row.get("url") or "#"
+        img = row.get("image_url") or row.get("image") or ""
+        brand = str(row.get("brand", "") or "")
+        title = str(row.get("title", "") or "")
+
+        if img:
+            st.markdown(f'<a href="{link}" target="_blank"><img class="card-thumb" src="{img}"/></a>',
+                        unsafe_allow_html=True)
+
+        # brand + title
+        st.markdown(f'<div class="brand">{brand}</div>', unsafe_allow_html=True)
+        st.markdown(f'<a href="{link}" target="_blank"><div class="title">{title}</div></a>', unsafe_allow_html=True)
+
+        # prices
+        latest = row.get("latest_price")
+        min_price = row.get("min_price")
+        second_low = row.get("second_lowest_price")
+        latest_usd = row.get("latest_usd")
+        landed_usd = row.get("landed_usd")
+
+        if latest is not None:
+            st.markdown(f"**AED {latest:,.2f}**")
+        if latest_usd is not None:
+            st.markdown(f'<div class="usd-red">~ ${latest_usd:,.2f}</div>', unsafe_allow_html=True)
+        if landed_usd is not None:
+            st.markdown(f'<div class="usd-landed">Landed ~ ${landed_usd:,.2f}</div>', unsafe_allow_html=True)
+
+        st.markdown('<div class="section-gap"></div>', unsafe_allow_html=True)
+        st.markdown(
+            f'<div class="small-cap">All-time low: AED {min_price:,.2f} • 2nd-lowest: AED {second_low:,.2f}</div>',
+            unsafe_allow_html=True
+        )
+        st.markdown(
+            f'<div class="small-cap">30d Δ: {pct_fmt(row.get("delta_vs_30d_pct"))}</div>',
+            unsafe_allow_html=True
+        )
+        st.markdown(
+            f'<div class="small-cap">90d Δ: {pct_fmt(row.get("delta_vs_90d_pct"))}</div>',
+            unsafe_allow_html=True
+        )
+        st.markdown(
+            f'<div class="small-cap">2nd-lowest gap: {pct_fmt(row.get("gap_to_second_lowest_pct"))}</div>',
+            unsafe_allow_html=True
+        )
+
+        # time-series (guard for missing URL)
+        with st.expander("📈 Price History (AED)", expanded=False):
+            item_url = row.get("url")
+            if not item_url:
+                st.info("No URL available for time-series lookup.")
+            else:
+                ts = fetch_series(item_url, n=MAX_POINTS)
+                if ts.empty:
+                    st.info("No time-series data.")
+                else:
+                    fig = go.Figure()
+                    fig.add_trace(go.Scatter(x=ts["timestamp"], y=ts["price"], mode="lines+markers", name="Price"))
+                    fig.update_layout(xaxis_title="Date (Asia/Beirut)", yaxis_title="AED",
+                                      margin=dict(l=10, r=10, t=30, b=10), height=280)
+                    st.plotly_chart(fig, use_container_width=True)
+
+        st.markdown('</div>', unsafe_allow_html=True)  # card end
+
+    st.markdown('</div>', unsafe_allow_html=True)  # grid end
+
+    # Pager
+    left, mid, right = st.columns(3)
+    with left:
+        if st.button("⟵ Prev", disabled=flt["page"] <= 0, use_container_width=True):
+            st.session_state["w_page"] = max(0, flt["page"] - 1)
+            qp_set(page=str(st.session_state["w_page"]))
+            st.rerun()
+    with right:
+        more = (total is None) or ((flt["page"] + 1) * flt["page_size"] < (total or 0))
+        if st.button("Next ⟶", disabled=not more, use_container_width=True):
+            st.session_state["w_page"] = flt["page"] + 1
+            qp_set(page=str(st.session_state["w_page"]))
+            st.rerun()
