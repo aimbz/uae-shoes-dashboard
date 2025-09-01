@@ -1,5 +1,5 @@
 [browser]
-gatherUsageStats = false    # kills api.segment.io chatter in console
+gatherUsageStats = false
 
 [client]
 toolbarMode = "minimal"
