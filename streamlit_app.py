@@ -652,25 +652,52 @@ for r in range(rows):
                     st.markdown(f'<div class="small-cap">90d Δ: {pct_fmt(row.get("delta_vs_90d_pct"))}</div>', unsafe_allow_html=True)
                     st.markdown(f'<div class="small-cap">2nd-lowest gap: {pct_fmt(row.get("gap_to_second_lowest_pct"))}</div>', unsafe_allow_html=True)
 
-with st.expander("📈 Price History (AED)", expanded=False, key=f"exp_price_{i}"):
-    ts = fetch_series(row["url"], n=MAX_POINTS)
-    if ts.empty:
-        st.info("No time-series data for this item.")
-    else:
-        ts = ts.copy()
-        ts["price"] = pd.to_numeric(ts["price"], errors="coerce")
-        ts = ts.dropna(subset=["timestamp","price"]).sort_values("timestamp")
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(x=ts["timestamp"], y=ts["price"], mode="lines+markers", name="Price"))
-        fig.update_layout(xaxis_title="Date (Asia/Beirut)", yaxis_title="AED",
-                          margin=dict(l=10, r=10, t=30, b=10), height=280)
-        st.plotly_chart(fig, use_container_width=True, key=f"price_chart_{i}")
+# ---- Price chart (robust) ----
+item_url = row.get("url") or row.get("link") or row.get("product_url")  # fallback keys if schema changed
+url_key  = f"{abs(hash(item_url)) % 10_000_000}" if item_url else f"no_url_{i}"
 
+try:
+    with st.expander("📈 Price History (AED)", expanded=False, key=f"exp_price_{i}_{url_key}"):
+        if not item_url:
+            st.info("No URL on this row — cannot load time series.")
+        else:
+            ts = fetch_series(item_url, n=MAX_POINTS)
 
+            # Diagnostics
+            LOG.log("series", {"url": item_url, "points": 0 if ts is None else len(ts)})
 
+            if ts is None or ts.empty:
+                st.info("No time-series data for this item.")
+            else:
+                ts = ts.copy()
+                # Ensure numeric prices and clean timestamps
+                ts["price"] = pd.to_numeric(ts["price"], errors="coerce")
+                ts = ts.dropna(subset=["timestamp", "price"]).sort_values("timestamp")
+
+                if ts.empty:
+                    st.info("No valid numeric points to plot.")
+                else:
+                    fig = go.Figure()
+                    fig.add_trace(go.Scatter(
+                        x=ts["timestamp"],
+                        y=ts["price"],
+                        mode="lines+markers",
+                        name="Price"
+                    ))
+                    fig.update_layout(
+                        xaxis_title="Date (Asia/Beirut)",
+                        yaxis_title="AED",
+                        margin=dict(l=10, r=10, t=30, b=10),
+                        height=280
+                    )
+                    st.plotly_chart(fig, use_container_width=True, key=f"price_chart_{i}_{url_key}")
+except Exception as e:
+    st.error(f"Chart failed for card {i}: {type(e).__name__}: {e}")
+    LOG.log("chart_error", {"i": i, "url": item_url, "err": f"{type(e).__name__}: {e}"})
 
 # Logs (collapsed)
 LOG.render()
+
 
 
 
