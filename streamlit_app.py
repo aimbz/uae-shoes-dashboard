@@ -652,43 +652,25 @@ for r in range(rows):
                     st.markdown(f'<div class="small-cap">90d Δ: {pct_fmt(row.get("delta_vs_90d_pct"))}</div>', unsafe_allow_html=True)
                     st.markdown(f'<div class="small-cap">2nd-lowest gap: {pct_fmt(row.get("gap_to_second_lowest_pct"))}</div>', unsafe_allow_html=True)
 
-with st.expander("📈 Price History (AED)", expanded=False):
+with st.expander("📈 Price History (AED)", expanded=False, key=f"exp_price_{i}"):
     ts = fetch_series(row["url"], n=MAX_POINTS)
-
-    # ---- diagnostics
-    LOG.log("series", {"url": row.get("url"), "points": 0 if ts is None else len(ts)})
-
-    if ts is None or ts.empty:
+    if ts.empty:
         st.info("No time-series data for this item.")
     else:
-        # Ensure numeric & clean
         ts = ts.copy()
         ts["price"] = pd.to_numeric(ts["price"], errors="coerce")
-        ts = ts.dropna(subset=["timestamp", "price"]).sort_values("timestamp")
+        ts = ts.dropna(subset=["timestamp","price"]).sort_values("timestamp")
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=ts["timestamp"], y=ts["price"], mode="lines+markers", name="Price"))
+        fig.update_layout(xaxis_title="Date (Asia/Beirut)", yaxis_title="AED",
+                          margin=dict(l=10, r=10, t=30, b=10), height=280)
+        st.plotly_chart(fig, use_container_width=True, key=f"price_chart_{i}")
 
-        if ts.empty:
-            st.info("No valid numeric points to plot.")
-        else:
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(
-                x=ts["timestamp"],
-                y=ts["price"],
-                mode="lines+markers",
-                name="Price"
-            ))
-            fig.update_layout(
-                xaxis_title="Date (Asia/Beirut)",
-                yaxis_title="AED",
-                margin=dict(l=10, r=10, t=30, b=10),
-                height=280
-            )
-            # Unique key per card (either index or hash of URL)
-            st.plotly_chart(fig, use_container_width=True, key=f"price_chart_{i}")
-            # Alternative: key=f"pc_{abs(hash(row['url'])) % 10_000_000}"
 
 
 
 # Logs (collapsed)
 LOG.render()
+
 
 
