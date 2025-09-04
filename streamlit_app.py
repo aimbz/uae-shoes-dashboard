@@ -654,18 +654,41 @@ for r in range(rows):
 
 with st.expander("📈 Price History (AED)", expanded=False):
     ts = fetch_series(row["url"], n=MAX_POINTS)
-    if ts.empty:
-        st.info("No time-series data.")
+
+    # ---- diagnostics
+    LOG.log("series", {"url": row.get("url"), "points": 0 if ts is None else len(ts)})
+
+    if ts is None or ts.empty:
+        st.info("No time-series data for this item.")
     else:
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(x=ts["timestamp"], y=ts["price"], mode="lines+markers", name="Price"))
-        fig.update_layout(xaxis_title="Date (Asia/Beirut)", yaxis_title="AED",
-                          margin=dict(l=10, r=10, t=30, b=10), height=280)
-        # 👇 add a unique key per card
-        st.plotly_chart(fig, use_container_width=True, key=f"price_chart_{i}")
-        # or: key=f"price_chart_{hash(row['url']) & 0xfffffff}"
+        # Ensure numeric & clean
+        ts = ts.copy()
+        ts["price"] = pd.to_numeric(ts["price"], errors="coerce")
+        ts = ts.dropna(subset=["timestamp", "price"]).sort_values("timestamp")
+
+        if ts.empty:
+            st.info("No valid numeric points to plot.")
+        else:
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(
+                x=ts["timestamp"],
+                y=ts["price"],
+                mode="lines+markers",
+                name="Price"
+            ))
+            fig.update_layout(
+                xaxis_title="Date (Asia/Beirut)",
+                yaxis_title="AED",
+                margin=dict(l=10, r=10, t=30, b=10),
+                height=280
+            )
+            # Unique key per card (either index or hash of URL)
+            st.plotly_chart(fig, use_container_width=True, key=f"price_chart_{i}")
+            # Alternative: key=f"pc_{abs(hash(row['url'])) % 10_000_000}"
+
 
 
 # Logs (collapsed)
 LOG.render()
+
 
