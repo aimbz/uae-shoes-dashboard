@@ -652,16 +652,20 @@ for r in range(rows):
                     st.markdown(f'<div class="small-cap">90d Δ: {pct_fmt(row.get("delta_vs_90d_pct"))}</div>', unsafe_allow_html=True)
                     st.markdown(f'<div class="small-cap">2nd-lowest gap: {pct_fmt(row.get("gap_to_second_lowest_pct"))}</div>', unsafe_allow_html=True)
 
-                with st.expander("📈 Price History (AED)", expanded=False):
-                    ts = fetch_series(row["url"], n=MAX_POINTS)
-                    if ts.empty:
-                        st.info("No time-series data.")
-                    else:
-                        fig = go.Figure()
-                        fig.add_trace(go.Scatter(x=ts["timestamp"], y=ts["price"], mode="lines+markers", name="Price"))
-                        fig.update_layout(xaxis_title="Date (Asia/Beirut)", yaxis_title="AED",
-                                          margin=dict(l=10, r=10, t=30, b=10), height=280)
-                        st.plotly_chart(fig, use_container_width=True)
+with st.expander("📈 Price History (AED)", expanded=False):
+    ts = fetch_series(row["url"], n=MAX_POINTS)
+    if ts.empty:
+        st.info("No time-series data.")
+    else:
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=ts["timestamp"], y=ts["price"], mode="lines+markers", name="Price"))
+        fig.update_layout(xaxis_title="Date (Asia/Beirut)", yaxis_title="AED",
+                          margin=dict(l=10, r=10, t=30, b=10), height=280)
+        # 👇 add a unique key per card
+        st.plotly_chart(fig, use_container_width=True, key=f"price_chart_{i}")
+        # or: key=f"price_chart_{hash(row['url']) & 0xfffffff}"
+
 
 # Logs (collapsed)
 LOG.render()
+
