@@ -140,10 +140,8 @@ if not SUPABASE_URL or not SUPABASE_ANON_KEY:
 
 REST = f"{SUPABASE_URL}/rest/v1"
 
-# ⬇️ NEW: use the global MV
+# ⬇️ Global MV name & price-series fallback tables
 MV = "nam_global_shoes_at_global_low"
-
-# ⬇️ NEW: price-series lookup order for the chart
 PRICES_TABLES = [
     "nam-uae-men-shoes-prices",
     "nam-uae-women-shoes-prices",
@@ -189,6 +187,19 @@ def qp_clear():
     except Exception:
         st.experimental_set_query_params()
 
+def parse_range(s: str, cast=float):
+    try:
+        lo, hi = s.split("-", 1)
+        return (cast(lo), cast(hi))
+    except Exception:
+        return None
+
+def parse_float(s, default=0.0):
+    try:
+        return float(s)
+    except Exception:
+        return default
+
 def encode_filters_to_qp():
     brands = st.session_state.get("w_brands", [])
     category = st.session_state.get("w_category")
@@ -216,19 +227,6 @@ def encode_filters_to_qp():
         "m": str(margin),
         "cb": str(cashback),
     })
-
-def parse_range(s: str, cast=float):
-    try:
-        lo, hi = s.split("-", 1)
-        return (cast(lo), cast(hi))
-    except Exception:
-        return None
-
-def parse_float(s, default=0.0):
-    try:
-        return float(s)
-    except Exception:
-        return default
 
 def hydrate_from_qp(brands_opts, categories_opts, pmin, pmax, hmin, hmax):
     qp = qp_get()
@@ -330,6 +328,10 @@ def load_options():
 
 AED_TO_USD = 0.282
 
+def html_escape(s: str) -> str:
+    return (str(s).replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
+                 .replace('"',"&quot;").replace("'","&#39;"))
+
 def pg_in(values: list[str]) -> str:
     esc = [v.replace('"', '""') for v in values]
     return 'in.(' + ",".join([f'"{e}"' for e in esc]) + ')'
@@ -424,6 +426,10 @@ with st.sidebar:
         except Exception as e:
             LOG.log("Ping MV failed", {"error": str(e)})
             st.error(f"Ping failed: {e}")
+    if st.button("Clear cache & rerun", key="btn_clear_cache"):
+        st.cache_data.clear()
+        st.rerun()
+
     st.markdown("---")
     if st.button("Reset filters", key="btn_reset"):
         for k in list(st.session_state.keys()):
@@ -499,20 +505,29 @@ with st.form("filters_form"):
         category = selectbox_stateful("w_category", "Category", options=["(Any)"] + categories, index_default=0)
     with c2:
         hits_range = slider_stateful("w_hits", "Min hits", hmin, max(hmin, hmax), (hmin, max(hmin, hmax)))
-        price_range = slider_stateful("w_price", "Price range (AED)", float(pmin), float(pmax or max(pmin, pmin + 1)),
-                                      (float(pmin), float(pmax or max(pmin, pmin + 1))))
+        price_range = slider_stateful(
+            "w_price",
+            "Price range (AED)",
+            float(pmin),
+            float(pmax or max(pmin, pmin + 1)),
+            (float(pmin), float(pmax or max(pmin, pmin + 1)))
+        )
     with c3:
         drop_prev = slider_stateful("w_drop_prev", "Drop vs previous (%)", -100, 100, (-100, 100))
-        drop_30 = slider_stateful("w_drop_30", "Drop vs 30-day avg (%)", -100, 100, (-100, 100))
-        drop_90 = slider_stateful("w_drop_90", "Drop vs 90-day avg (%)", -100, 100, (-100, 100))
+        drop_30   = slider_stateful("w_drop_30", "Drop vs 30-day avg (%)", -100, 100, (-100, 100))
+        drop_90   = slider_stateful("w_drop_90", "Drop vs 90-day avg (%)", -100, 100, (-100, 100))
 
     st.markdown("---")
     cA, cB, cC = st.columns(3)
     with cA:
-        order_by = selectbox_stateful("w_order_by", "Order by",
-                                      options=["delta_vs_30d_pct","delta_vs_90d_pct","drop_pct_vs_prev",
-                                               "latest_price","min_hits","gap_to_second_lowest_pct","days_since_first_low"],
-                                      index_default=0)
+        order_by = selectbox_stateful(
+            "w_order_by", "Order by",
+            options=[
+                "delta_vs_30d_pct","delta_vs_90d_pct","drop_pct_vs_prev",
+                "latest_price","min_hits","gap_to_second_lowest_pct","days_since_first_low"
+            ],
+            index_default=0
+        )
     with cB:
         order_desc = toggle_stateful("w_order_desc", "Sort descending", True)
     with cC:
@@ -520,7 +535,7 @@ with st.form("filters_form"):
 
     submitted = st.form_submit_button("Apply Filters", use_container_width=True)
     if submitted:
-        # DO NOT manually set st.session_state["w_*"] here; widgets already saved their values.
+        # widgets already saved their values
         st.session_state["filters_applied"] = True
         st.session_state["page"] = 0
         encode_filters_to_qp()
@@ -543,13 +558,10 @@ flt = {
 }
 
 # Costs (safe coalesce)
-def clamp01(x: float) -> float:
-    try: return max(0.0, min(1.0, float(x)))
-    except Exception: return 0.0
-
 cashback_frac = clamp01((st.session_state.get("w_cashback_pct") or 0.0) / 100.0)
 margin_frac   = clamp01((st.session_state.get("w_margin_pct")   or 0.0) / 100.0)
 ship_usd      = float(st.session_state.get("w_ship_usd")        or 0.0)
+
 
 # ============================ Results ============================
 
@@ -558,55 +570,28 @@ page = st.session_state.get("page", 0)
 prev_col, _, next_col = st.columns([1, 6, 1])
 with prev_col:
     if st.button("⟵ Prev", disabled=(page <= 0), key="btn_prev"):
-        st.session_state["page"] = max(0, page - 1); encode_filters_to_qp(); st.rerun()
+        st.session_state["page"] = max(0, page - 1)
+        encode_filters_to_qp()
+        st.rerun()
 with next_col:
     if st.button("Next ⟶", key="btn_next"):
-        st.session_state["page"] = page + 1; encode_filters_to_qp(); st.rerun()
+        st.session_state["page"] = page + 1
+        encode_filters_to_qp()
+        st.rerun()
 
 page = st.session_state.get("page", 0)
 page_size = st.session_state.get("w_page_size", 24)
 
 # Fetch
-def build_params(flt: dict, limit: int, offset: int) -> dict:
-    direction = "desc" if flt["order_desc"] else "asc"
-    p: dict[str, list | str] = {
-        "select": "*",
-        "has_higher": "eq.true",
-        "order": f"{flt['order_by']}.{direction}.nullslast,latest_price.asc,brand.asc",
-        "limit": str(limit),
-        "offset": str(offset),
-    }
-    if flt["brands"]:   p["brand"] = pg_in(flt["brands"])
-    if flt["category"]: p["category"] = f"eq.{flt['category']}"
-    lo, hi = flt["min_hits"];      p["min_hits"] = [f"gte.{lo}", f"lte.{hi}"]
-    plo, phi = flt["price_range"]; p["latest_price"] = [f"gte.{plo}", f"lte.{phi}"]
-    for col, (lo_pct, hi_pct) in {
-        "drop_pct_vs_prev": flt["drop_prev"],
-        "delta_vs_30d_pct": flt["drop_30"],
-        "delta_vs_90d_pct": flt["drop_90"],
-    }.items():
-        p[col] = [f"gte.{lo_pct/100.0}", f"lte.{hi_pct/100.0}"]
-    return p
-
-@st.cache_data(ttl=300)
-def fetch_items(flt: dict, page: int, page_size: int) -> tuple[pd.DataFrame, int | None]:
-    params = build_params(flt, page_size, page * page_size)
-    data, cr = http_get(f"{REST}/{MV}", params, label="fetch_items")
-    total = int(cr.split("/")[-1]) if cr and "/" in cr else None
-    df = pd.DataFrame(data)
-    return df, total
-
 df, total = fetch_items(flt, page, page_size)
 if df.empty:
-    st.warning("No items match your filters."); LOG.render(); st.stop()
+    st.warning("No items match your filters.")
+    LOG.render()
+    st.stop()
 
 st.caption(f"Matches: {total if total is not None else '—'}  •  Page {page + 1}")
 
 # ============================ Cards grid ============================
-
-def html_escape(s: str) -> str:
-    return (str(s).replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
-                 .replace('"',"&quot;").replace("'","&#39;"))
 
 ncols = 4
 rows = math.ceil(len(df) / ncols)
@@ -615,7 +600,8 @@ for r in range(rows):
     cols = st.columns(ncols, gap="large")
     for c in range(ncols):
         i = r * ncols + c
-        if i >= len(df): break
+        if i >= len(df):
+            break
         row = df.iloc[i]
         with cols[c]:
             with st.container(border=True):
@@ -624,9 +610,11 @@ for r in range(rows):
                     link = row.get("url") or "#"
                     img = html_escape(row.get("image_link", ""))
                     alt = html_escape(row.get("title", "") or row.get("brand","") or "product")
-                    st.markdown(f'<a href="{link}" target="_blank" rel="noopener">'
-                                f'<img class="card-thumb" src="{img}" alt="{alt}"/></a>',
-                                unsafe_allow_html=True)
+                    st.markdown(
+                        f'<a href="{link}" target="_blank" rel="noopener">'
+                        f'<img class="card-thumb" src="{img}" alt="{alt}"/></a>',
+                        unsafe_allow_html=True
+                    )
 
                 st.markdown(f'<div class="card-brand">{html_escape(row.get("brand",""))}</div>', unsafe_allow_html=True)
                 st.markdown(f'<div class="card-title">{html_escape(row.get("title",""))}</div>', unsafe_allow_html=True)
@@ -645,59 +633,48 @@ for r in range(rows):
                     st.markdown(f'<div class="usd-red">≈ ${usd:,.2f} USD</div>', unsafe_allow_html=True)
                     st.markdown(f'<div class="usd-landed">Landed: ${landed_usd:,.2f}</div>', unsafe_allow_html=True)
 
-
                 with right_col:
                     st.metric("Drop vs prev", pct_fmt(row.get("drop_pct_vs_prev")))
                     st.markdown(f'<div class="small-cap section-gap">30d Δ: {pct_fmt(row.get("delta_vs_30d_pct"))}</div>', unsafe_allow_html=True)
                     st.markdown(f'<div class="small-cap">90d Δ: {pct_fmt(row.get("delta_vs_90d_pct"))}</div>', unsafe_allow_html=True)
                     st.markdown(f'<div class="small-cap">2nd-lowest gap: {pct_fmt(row.get("gap_to_second_lowest_pct"))}</div>', unsafe_allow_html=True)
 
-# ---- Price chart (robust) ----
-item_url = row.get("url") or row.get("link") or row.get("product_url")  # fallback keys if schema changed
-url_key  = f"{abs(hash(item_url)) % 10_000_000}" if item_url else f"no_url_{i}"
+                # ---- Price chart (robust; unique key on chart, no key on expander) ----
+                item_url = row.get("url") or row.get("link") or row.get("product_url")
+                url_key  = f"{abs(hash(item_url)) % 10_000_000}" if item_url else f"no_url_{i}"
 
-try:
-    with st.expander("📈 Price History (AED)", expanded=False, key=f"exp_price_{i}_{url_key}"):
-        if not item_url:
-            st.info("No URL on this row — cannot load time series.")
-        else:
-            ts = fetch_series(item_url, n=MAX_POINTS)
+                with st.expander("📈 Price History (AED)", expanded=False):
+                    if not item_url:
+                        st.info("No URL on this row — cannot load time series.")
+                    else:
+                        ts = fetch_series(item_url, n=MAX_POINTS)
+                        LOG.log("series", {"card": i, "url": item_url, "points": 0 if ts is None else len(ts)})
 
-            # Diagnostics
-            LOG.log("series", {"url": item_url, "points": 0 if ts is None else len(ts)})
+                        if ts is None or ts.empty:
+                            st.info("No time-series data for this item.")
+                        else:
+                            ts = ts.copy()
+                            ts["price"] = pd.to_numeric(ts["price"], errors="coerce")
+                            ts = ts.dropna(subset=["timestamp", "price"]).sort_values("timestamp")
 
-            if ts is None or ts.empty:
-                st.info("No time-series data for this item.")
-            else:
-                ts = ts.copy()
-                # Ensure numeric prices and clean timestamps
-                ts["price"] = pd.to_numeric(ts["price"], errors="coerce")
-                ts = ts.dropna(subset=["timestamp", "price"]).sort_values("timestamp")
-
-                if ts.empty:
-                    st.info("No valid numeric points to plot.")
-                else:
-                    fig = go.Figure()
-                    fig.add_trace(go.Scatter(
-                        x=ts["timestamp"],
-                        y=ts["price"],
-                        mode="lines+markers",
-                        name="Price"
-                    ))
-                    fig.update_layout(
-                        xaxis_title="Date (Asia/Beirut)",
-                        yaxis_title="AED",
-                        margin=dict(l=10, r=10, t=30, b=10),
-                        height=280
-                    )
-                    st.plotly_chart(fig, use_container_width=True, key=f"price_chart_{i}_{url_key}")
-except Exception as e:
-    st.error(f"Chart failed for card {i}: {type(e).__name__}: {e}")
-    LOG.log("chart_error", {"i": i, "url": item_url, "err": f"{type(e).__name__}: {e}"})
+                            if ts.empty:
+                                st.info("No valid numeric points to plot.")
+                            else:
+                                fig = go.Figure()
+                                fig.add_trace(go.Scatter(
+                                    x=ts["timestamp"],
+                                    y=ts["price"],
+                                    mode="lines+markers",
+                                    name="Price"
+                                ))
+                                fig.update_layout(
+                                    xaxis_title="Date (Asia/Beirut)",
+                                    yaxis_title="AED",
+                                    margin=dict(l=10, r=10, t=30, b=10),
+                                    height=280
+                                )
+                                # Unique key avoids DuplicateElementId when repeating charts in a loop
+                                st.plotly_chart(fig, use_container_width=True, key=f"price_chart_{i}_{url_key}")
 
 # Logs (collapsed)
 LOG.render()
-
-
-
-
