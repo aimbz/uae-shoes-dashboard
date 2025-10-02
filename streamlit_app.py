@@ -531,7 +531,7 @@ with st.form("filters_form"):
     with cB:
         order_desc = toggle_stateful("w_order_desc", "Sort descending", True)
     with cC:
-        page_size = select_slider_stateful("w_page_size", "Page size", options=[12, 24, 48, 96], value_default=24)
+        page_size = select_slider_stateful("w_page_size", "Page size", options=[12, 24, 48, 96, 192, 384], value_default=24)
 
     submitted = st.form_submit_button("Apply Filters", use_container_width=True)
     if submitted:
@@ -678,3 +678,4 @@ for r in range(rows):
 
 # Logs (collapsed)
 LOG.render()
+
